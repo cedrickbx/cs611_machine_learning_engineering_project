@@ -18,17 +18,38 @@ End-to-end MLE project with **Airflow**-orchestrated pipelines, a reproducible *
 
 ## Repository Layout
 ```
-.
-├─ scripts/
-│  ├─ data/                 # Raw input data (large files are NOT tracked by Git)
-│  ├─ datamart/             # Pipeline outputs (features/labels/gold tables)
-│  ├─ utils/                # Shared utility functions
-│  ├─ bronze_label_store.py # Template task for Airflow (use as a reference)
-│  └─ notebooks/            # EDA notebooks (Jupyter)
-├─ Dockerfile
-├─ docker-compose.yaml
-├─ requirements.txt
-└─ README.md
+cs611_machine_learning_engineering_project/
+├── README.md
+├── .gitignore
+├── docker-compose.yaml                 # Airflow + Jupyter services
+├── Dockerfile                          # PySpark + Jupyter image
+├── requirements.txt                    # Python deps
+│
+├── dags/                               # Airflow DAGs (mounted into scheduler/webserver)
+│   ├── __init__.py
+│   └── day.py
+│
+├── scripts/
+│   ├── utils/                          # Shared utility functions
+│   │   ├── __init__.py
+│   │   └── data_processing_flight_bronze.py  # Bronze layer logic
+│   │
+│   ├── bronze_label_store.py           # Template task for Airflow (reference)
+│   ├── main_static.py                  # Main Bronze processing script
+│   ├── test_setup.py                   # Environment validation
+│   └── notebooks/                      # Jupyter notebooks for EDA
+│
+├── data/                               # Raw input data (NOT tracked)
+│   └── flight/
+│       └── train/                      # 24 monthly CSVs
+│           ├── T_ONTIME_REPORTING-01_23.csv
+│           ├── T_ONTIME_REPORTING-02_23.csv
+│           └── ... (22 more files)
+│
+└── datamart/                           # Pipeline outputs (NOT tracked)
+    └── bronze/
+        └── flight/
+            └── bronze_flight_combined.parquet/   # ← Output
 ```
 
 ## Data Locations

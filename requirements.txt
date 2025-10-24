@@ -1,3 +1,4 @@
+
 numpy
 pandas
 matplotlib
@@ -6,3 +7,11 @@ scipy
 scikit-learn
 pyspark
 xgboost
+jupyterlab==4.3.5
+pyspark==3.5.5
+pandas==2.2.3
+numpy==2.2.2
+matplotlib==3.10.0
+seaborn==0.13.2
+holidays==0.58
+pyarrow==18.1.0

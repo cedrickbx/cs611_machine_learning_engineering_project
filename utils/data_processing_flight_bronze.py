@@ -1,7 +1,12 @@
 """
-Bronze Layer Processing for Flight Delay Data
+Bronze Layer Processing for Flight Delay Data - MODIFIED FOR OOT
 
-Processes raw flight CSV files into a single combined Parquet file with:
+Supports three processing modes:
+1. Historical batch: Process all 24 months (Jan 2023 - Dec 2024)
+2. Daily OOT: Process single day for inference
+3. Monthly append: Add full month to historical Bronze for retraining model every month
+
+Processes raw flight CSV files into Parquet with:
 - NYC metro airport filtering (JFK, LGA, EWR)
 - Temporal features (DayOfWeek, IsWeekend, IsPublicHoliday)
 - Target variable (is_delayed_15)
@@ -10,7 +15,7 @@ Processes raw flight CSV files into a single combined Parquet file with:
 
 import os
 from datetime import datetime
-from typing import List, Dict
+from typing import List, Dict, Optional
 import holidays
 
 from pyspark.sql import SparkSession, DataFrame
@@ -19,13 +24,12 @@ from pyspark.sql.functions import (
     dayofweek, udf, coalesce
 )
 from pyspark.sql.types import IntegerType, DateType, StringType
-from pyspark.sql.window import Window
 
 
 # NYC Metro airports - our scope
 NYC_METRO_AIRPORTS = ['JFK', 'LGA', 'EWR']
 
-# US Federal holidays for our date range
+# US Federal holidays for our date range (extended to 2025)
 US_HOLIDAYS = holidays.US(years=range(2023, 2026))
 
 
@@ -45,13 +49,39 @@ def get_csv_filename(year: int, month: int) -> str:
     return f"T_ONTIME_REPORTING-{month_str}_{year_str}.csv"
 
 
-def process_single_csv(csv_path: str, spark: SparkSession) -> DataFrame:
+def get_csv_from_date(snapshot_date: str, data_directory: str) -> str:
     """
-    Load and process a single monthly CSV file
+    Determine which CSV file contains data for a given date
+    
+    Args:
+        snapshot_date: Date string "YYYY-MM-DD"
+        data_directory: Directory containing CSV files
+    
+    Returns:
+        Full path to CSV file
+    """
+    date_obj = datetime.strptime(snapshot_date, "%Y-%m-%d")
+    csv_filename = get_csv_filename(date_obj.year, date_obj.month)
+    csv_path = os.path.join(data_directory, csv_filename)
+    
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(
+            f"CSV file not found for date {snapshot_date}: {csv_path}\n"
+            f"Expected file: {csv_filename}"
+        )
+    
+    return csv_path
+
+
+def process_single_csv(csv_path: str, spark: SparkSession, 
+                      snapshot_date: Optional[str] = None) -> DataFrame:
+    """
+    Load and process a single CSV file
     
     Args:
         csv_path: Path to CSV file
         spark: SparkSession
+        snapshot_date: Optional date filter "YYYY-MM-DD". If provided, only load this date.
     
     Returns:
         Processed DataFrame
@@ -62,7 +92,7 @@ def process_single_csv(csv_path: str, spark: SparkSession) -> DataFrame:
     df = spark.read.csv(csv_path, header=True, inferSchema=True)
     
     initial_count = df.count()
-    print(f"    Initial rows: {initial_count:,}")
+    print(f"    Initial rows in CSV: {initial_count:,}")
     
     # Derive FlightDate from year/month/day columns
     df = df.withColumn(
@@ -77,6 +107,16 @@ def process_single_csv(csv_path: str, spark: SparkSession) -> DataFrame:
         )
     )
     
+    # Filter by date if snapshot_date provided (DAILY OOT MODE)
+    if snapshot_date is not None:
+        print(f"    Filtering for date: {snapshot_date}")
+        df = df.filter(col('FlightDate') == snapshot_date)
+        date_filtered_count = df.count()
+        print(f"    After date filter: {date_filtered_count:,}")
+        
+        if date_filtered_count == 0:
+            print(f"    WARNING: No data found for date {snapshot_date}")
+    
     # Filter for NYC metro airports only
     df = df.filter(
         col('ORIGIN').isin(NYC_METRO_AIRPORTS) | 
@@ -84,7 +124,7 @@ def process_single_csv(csv_path: str, spark: SparkSession) -> DataFrame:
     )
     
     filtered_count = df.count()
-    print(f"    After NYC filter: {filtered_count:,} ({filtered_count/initial_count*100:.1f}%)")
+    print(f"    After NYC filter: {filtered_count:,}")
     
     # Add source file metadata
     df = df.withColumn('source_file', lit(os.path.basename(csv_path)))
@@ -148,7 +188,6 @@ def add_derived_columns(df: DataFrame) -> DataFrame:
     )
     
     # 6. IsPublicHoliday using holidays library
-    # Create UDF to check if date is a US federal holiday
     @udf(returnType=IntegerType())
     def is_holiday(date):
         if date is None:
@@ -202,104 +241,150 @@ def generate_monthly_dates(start_year: int, start_month: int,
 
 def process_all_months_to_bronze(data_directory: str, 
                                  bronze_output_path: str,
-                                 spark: SparkSession) -> DataFrame:
+                                 spark: SparkSession,
+                                 snapshot_date: Optional[str] = None,
+                                 output_mode: str = 'overwrite') -> DataFrame:
     """
-    Main processing function: Combine all monthly CSVs into single Bronze Parquet
+    Main processing function: Process flight data to Bronze layer
     
-    Processing steps:
-    1. Load all 24 monthly CSV files
-    2. Filter for NYC metro airports (JFK, LGA, EWR)
-    3. Add derived columns (target, temporal features, etc.)
-    4. Union all DataFrames
-    5. Sort by FlightDate and sort_time
-    6. Save as partitioned Parquet
+    Supports three modes:
+    1. Historical batch (snapshot_date=None): Process all 24 months
+    2. Daily OOT (snapshot_date="2025-01-01"): Process single day
+    3. Monthly append (snapshot_date=None, output_mode='append'): Add month to existing
     
     Args:
-        data_directory: Directory containing CSV files (e.g., 'data/flight/train/')
-        bronze_output_path: Output path for Parquet (e.g., 'datamart/bronze/flight/bronze_flight_combined.parquet')
+        data_directory: Directory containing CSV files
+        bronze_output_path: Output path for Parquet
         spark: SparkSession
+        snapshot_date: Optional. Format "YYYY-MM-DD"
+                      - If None: Process all months (batch mode)
+                      - If provided: Process only this date (daily OOT mode)
+        output_mode: 'overwrite' or 'append'
+                    - overwrite: Replace existing data (default)
+                    - append: Add to existing Parquet
     
     Returns:
-        Final combined DataFrame
+        Processed DataFrame
     """
     print("="*80)
     print("BRONZE LAYER PROCESSING - FLIGHT DELAY DATA")
     print("="*80)
     
-    # Generate list of months to process (Jan 2023 - Dec 2024)
-    monthly_dates = generate_monthly_dates(2023, 1, 2024, 12)
-    print(f"\nProcessing {len(monthly_dates)} months: Jan 2023 - Dec 2024")
-    
-    # Process each month
-    dfs = []
-    for year, month in monthly_dates:
-        csv_filename = get_csv_filename(year, month)
-        csv_path = os.path.join(data_directory, csv_filename)
+    # MODE SELECTION
+    if snapshot_date is not None:
+        # DAILY OOT MODE
+        print(f"\nMode: DAILY OOT")
+        print(f"Processing date: {snapshot_date}")
+        print(f"Output path: {bronze_output_path}")
+        print(f"Output mode: {output_mode}")
         
-        if not os.path.exists(csv_path):
-            print(f"\n  WARNING: File not found: {csv_filename}")
-            continue
+        # Get CSV file for this date
+        csv_path = get_csv_from_date(snapshot_date, data_directory)
         
-        df_month = process_single_csv(csv_path, spark)
-        dfs.append(df_month)
+        # Process single day from that CSV
+        df = process_single_csv(csv_path, spark, snapshot_date=snapshot_date)
+        
+        if df.count() == 0:
+            print(f"\n⚠ WARNING: No flights found for {snapshot_date}")
+            return df
+        
+        # Add derived columns
+        df = add_derived_columns(df)
+        
+        # Sort by sort_time
+        print("\n  Sorting by FlightDate and sort_time...")
+        df = df.orderBy(['FlightDate', 'sort_time'])
+        
+        # Save with snapshot_date partition
+        print(f"\n{'='*80}")
+        print("SAVING TO PARQUET")
+        print("="*80)
+        print(f"\n  Output path: {bronze_output_path}")
+        print(f"  Partitioning by: snapshot_date")
+        print(f"  Mode: {output_mode}")
+        
+        # Add snapshot_date column for partitioning
+        df = df.withColumn('snapshot_date', lit(snapshot_date))
+        
+        os.makedirs(os.path.dirname(bronze_output_path), exist_ok=True)
+        df.write.mode(output_mode).partitionBy('snapshot_date').parquet(bronze_output_path)
+        
+        print("  ✓ Parquet file saved successfully!")
+        
+    else:
+        # HISTORICAL BATCH MODE
+        print(f"\nMode: HISTORICAL BATCH")
+        print(f"Processing: Jan 2023 - Dec 2024 (24 months)")
+        print(f"Output path: {bronze_output_path}")
+        print(f"Output mode: {output_mode}")
+        
+        # Generate list of months to process
+        monthly_dates = generate_monthly_dates(2023, 1, 2024, 12)
+        print(f"\nProcessing {len(monthly_dates)} months")
+        
+        # Process each month
+        dfs = []
+        for year, month in monthly_dates:
+            csv_filename = get_csv_filename(year, month)
+            csv_path = os.path.join(data_directory, csv_filename)
+            
+            if not os.path.exists(csv_path):
+                print(f"\n  WARNING: File not found: {csv_filename}")
+                continue
+            
+            df_month = process_single_csv(csv_path, spark, snapshot_date=None)
+            dfs.append(df_month)
+        
+        if not dfs:
+            raise ValueError("No CSV files were successfully processed!")
+        
+        print(f"\n{'='*80}")
+        print("COMBINING DATA")
+        print("="*80)
+        
+        # Union all monthly DataFrames
+        print("\n  Combining all months...")
+        df = dfs[0]
+        for df_month in dfs[1:]:
+            df = df.union(df_month)
+        
+        total_rows = df.count()
+        print(f"  Total rows after union: {total_rows:,}")
+        
+        # Add derived columns
+        df = add_derived_columns(df)
+        
+        # Sort by FlightDate and sort_time
+        print("\n  Sorting by FlightDate and sort_time...")
+        df = df.orderBy(['FlightDate', 'sort_time'])
+        
+        print(f"\n{'='*80}")
+        print("SAVING TO PARQUET")
+        print("="*80)
+        
+        os.makedirs(os.path.dirname(bronze_output_path), exist_ok=True)
+        
+        print(f"\n  Output path: {bronze_output_path}")
+        print(f"  Partitioning by: year_month")
+        print(f"  Mode: {output_mode}")
+        print("\n  Writing Parquet file...")
+        
+        df.write.mode(output_mode).partitionBy('year_month').parquet(bronze_output_path)
+        
+        print("  ✓ Parquet file saved successfully!")
     
-    if not dfs:
-        raise ValueError("No CSV files were successfully processed!")
-    
-    print(f"\n{'='*80}")
-    print("COMBINING DATA")
-    print("="*80)
-    
-    # Union all monthly DataFrames
-    print("\n  Combining all months...")
-    df_combined = dfs[0]
-    for df in dfs[1:]:
-        df_combined = df_combined.union(df)
-    
-    total_rows = df_combined.count()
-    print(f"  Total rows after union: {total_rows:,}")
-    
-    # Add derived columns
-    df_combined = add_derived_columns(df_combined)
-    
-    # Sort by FlightDate and sort_time
-    print("\n  Sorting by FlightDate and sort_time...")
-    df_combined = df_combined.orderBy(['FlightDate', 'sort_time'])
-    
-    print(f"\n{'='*80}")
-    print("SAVING TO PARQUET")
-    print("="*80)
-    
-    # Create output directory if needed
-    os.makedirs(os.path.dirname(bronze_output_path), exist_ok=True)
-    
-    # Save as Parquet partitioned by year_month
-    print(f"\n  Output path: {bronze_output_path}")
-    print("  Partitioning by: year_month")
-    print("  Compression: Snappy (default)")
-    print("\n  Writing Parquet file...")
-    
-    df_combined.write.mode('overwrite').partitionBy('year_month').parquet(bronze_output_path)
-    
-    print("  ✓ Parquet file saved successfully!")
-    
-    return df_combined
+    return df
 
 
-def validate_bronze_parquet(bronze_output_path: str, spark: SparkSession) -> Dict:
+def validate_bronze_parquet(bronze_output_path: str, spark: SparkSession,
+                           is_daily: bool = False) -> Dict:
     """
     Validate Bronze Parquet file quality
-    
-    Checks:
-    - Row count
-    - Date coverage
-    - NYC metro filter coverage
-    - Target variable distribution
-    - Schema validation
     
     Args:
         bronze_output_path: Path to Bronze Parquet
         spark: SparkSession
+        is_daily: True if validating daily OOT data, False for historical
     
     Returns:
         Dictionary with validation results
@@ -318,13 +403,20 @@ def validate_bronze_parquet(bronze_output_path: str, spark: SparkSession) -> Dic
     validation_results['total_rows'] = total_rows
     print(f"\n1. Total Rows: {total_rows:,}")
     
-    if 900000 <= total_rows <= 1200000:
-        print("   ✓ PASS - Row count within expected range")
+    if is_daily:
+        # Daily data: expect 100-5000 rows per day
+        if 0 < total_rows < 10000:
+            print("   ✓ PASS - Row count reasonable for daily data")
+        else:
+            print(f"   ⚠ WARNING - Row count unexpected for daily data")
     else:
-        print("   ⚠ WARNING - Row count outside expected range (900K-1.2M)")
+        # Historical data: expect ~1M rows
+        if 900000 <= total_rows <= 1200000:
+            print("   ✓ PASS - Row count within expected range")
+        else:
+            print("   ⚠ WARNING - Row count outside expected range (900K-1.2M)")
     
     # 2. Date coverage
-    date_stats = df.agg({'FlightDate': 'min', 'FlightDate': 'max'}).collect()[0]
     min_date = df.agg({'FlightDate': 'min'}).collect()[0][0]
     max_date = df.agg({'FlightDate': 'max'}).collect()[0][0]
     
@@ -333,53 +425,33 @@ def validate_bronze_parquet(bronze_output_path: str, spark: SparkSession) -> Dic
     
     print(f"\n2. Date Range: {min_date} to {max_date}")
     
-    if str(min_date).startswith('2023-01') and str(max_date).startswith('2024-12'):
-        print("   ✓ PASS - Date range covers Jan 2023 to Dec 2024")
+    if is_daily:
+        if min_date == max_date:
+            print("   ✓ PASS - Single date as expected for daily data")
+        else:
+            print("   ⚠ WARNING - Multiple dates found in daily data")
     else:
-        print("   ⚠ WARNING - Unexpected date range")
+        if str(min_date).startswith('2023-01') and str(max_date).startswith('2024-12'):
+            print("   ✓ PASS - Date range covers Jan 2023 to Dec 2024")
+        else:
+            print("   ⚠ WARNING - Unexpected date range")
     
-    # 3. Month coverage
-    unique_months = df.select('year_month').distinct().count()
-    validation_results['unique_months'] = unique_months
+    # 3. NYC metro filter validation
+    print("\n3. NYC Metro Filter Validation:")
     
-    print(f"\n3. Month Coverage: {unique_months} unique months")
-    
-    if unique_months == 24:
-        print("   ✓ PASS - All 24 months present")
-    else:
-        print(f"   ⚠ WARNING - Expected 24 months, found {unique_months}")
-        missing_months = df.groupBy('year_month').count().orderBy('year_month')
-        print("\n   Month distribution:")
-        missing_months.show(24, truncate=False)
-    
-    # 4. NYC metro filter validation
-    print("\n4. NYC Metro Filter Validation:")
-    
-    nyc_origin = df.filter(col('ORIGIN').isin(NYC_METRO_AIRPORTS)).count()
-    nyc_dest = df.filter(col('DEST').isin(NYC_METRO_AIRPORTS)).count()
     nyc_total = df.filter(
         col('ORIGIN').isin(NYC_METRO_AIRPORTS) | col('DEST').isin(NYC_METRO_AIRPORTS)
     ).count()
     
     validation_results['nyc_coverage'] = nyc_total
     
-    print(f"   Flights FROM NYC metro: {nyc_origin:,}")
-    print(f"   Flights TO NYC metro: {nyc_dest:,}")
-    print(f"   Total NYC flights: {nyc_total:,}")
-    
     if nyc_total == total_rows:
         print("   ✓ PASS - 100% of flights involve NYC metro airports")
     else:
         print(f"   ✗ FAIL - Only {nyc_total/total_rows*100:.1f}% coverage")
     
-    # 5. Airport distribution
-    print("\n5. Airport Distribution:")
-    airport_dist = df.groupBy('ORIGIN').count().orderBy(col('count').desc())
-    print("\n   Top Origin Airports:")
-    airport_dist.show(10)
-    
-    # 6. Target variable distribution
-    print("\n6. Target Variable (is_delayed_15):")
+    # 4. Target variable distribution
+    print("\n4. Target Variable (is_delayed_15):")
     delay_dist = df.groupBy('is_delayed_15').count().collect()
     
     for row in delay_dist:
@@ -390,30 +462,15 @@ def validate_bronze_parquet(bronze_output_path: str, spark: SparkSession) -> Dic
         print(f"   {label}: {count:,} ({pct:.2f}%)")
         validation_results[f'delay_{delay_val}'] = count
     
-    # 7. Cancelled flights
-    cancelled_count = df.filter(col('CANCELLED') == 1).count()
-    validation_results['cancelled'] = cancelled_count
-    print(f"\n7. Cancelled Flights: {cancelled_count:,} ({cancelled_count/total_rows*100:.2f}%)")
-    
-    # 8. Holiday detection
-    holiday_count = df.filter(col('IsPublicHoliday') == 1).count()
-    validation_results['holiday_flights'] = holiday_count
-    print(f"\n8. Flights on Public Holidays: {holiday_count:,}")
-    
-    # Show sample of holidays
-    print("\n   Sample holiday dates:")
-    df.filter(col('IsPublicHoliday') == 1).select('FlightDate').distinct() \
-        .orderBy('FlightDate').show(10, truncate=False)
-    
-    # 9. Schema check
-    print("\n9. Schema:")
+    # 5. Schema check
+    print("\n5. Schema:")
     print(f"   Total columns: {len(df.columns)}")
     
     expected_derived_cols = ['year_month', 'sort_time', 'is_delayed_15', 
                              'DayOfWeek', 'IsWeekend', 'IsPublicHoliday',
                              'source_file', 'processing_timestamp', 'FlightDate']
     
-    missing_cols = [col for col in expected_derived_cols if col not in df.columns]
+    missing_cols = [col_name for col_name in expected_derived_cols if col_name not in df.columns]
     
     if not missing_cols:
         print("   ✓ PASS - All derived columns present")

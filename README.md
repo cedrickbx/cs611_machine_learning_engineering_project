@@ -483,6 +483,258 @@ java -version
 
 ---
 
+# ADDITION TO README.md
+# Add this section after "Bronze Layer Specifications"
+
+---
+
+## 🔄 Daily OOT Processing (Out-of-Time Validation)
+
+### **Overview**
+
+The Bronze layer supports **two processing modes**:
+
+1. **Historical Batch** (default): Process all 24 months for model training
+2. **Daily OOT**: Process single day for out-of-time inference simulation
+
+### **Use Cases**
+
+| Mode | Use Case | Output | Command |
+|------|----------|--------|---------|
+| **Historical** | Initial model training | `bronze_flight_historical.parquet/` | `python main_static.py` |
+| **Daily OOT** | Daily inference (90 days) | `bronze_flight_oot.parquet/` | `python main_static.py --snapshotdate 2025-01-01` |
+
+### **Directory Structure**
+
+```
+datamart/bronze/flight/
+├── bronze_flight_historical.parquet/   # Training data (Jan 2023 - Dec 2024)
+│   ├── year_month=2023-01/
+│   ├── year_month=2023-02/
+│   └── ... (24 partitions)
+│
+└── bronze_flight_oot.parquet/         # OOT daily data (Jan-Mar 2025)
+    ├── snapshot_date=2025-01-01/
+    ├── snapshot_date=2025-01-02/
+    └── ... (90 daily partitions)
+```
+
+### **Daily OOT Workflow**
+
+#### **Step 1: Prepare OOT Data**
+
+Place OOT CSV files in separate directory:
+```
+data/flight/oot/
+├── T_ONTIME_REPORTING-01_25.csv  # January 2025
+├── T_ONTIME_REPORTING-02_25.csv  # February 2025
+└── T_ONTIME_REPORTING-03_25.csv  # March 2025
+```
+
+#### **Step 2: Process Daily Bronze**
+
+```bash
+# Process January 1, 2025
+python main_static.py --snapshotdate 2025-01-01
+
+# Process January 2, 2025
+python main_static.py --snapshotdate 2025-01-02
+
+# ... continue for 90 days
+```
+
+**Expected output per day**:
+```
+================================================================================
+BRONZE LAYER PROCESSING - FLIGHT DELAY DATA
+================================================================================
+
+Mode: DAILY OOT
+Processing date: 2025-01-01
+Output path: datamart/bronze/flight/bronze_flight_oot.parquet
+
+  Loading: T_ONTIME_REPORTING-01_25.csv
+    Initial rows in CSV: 52,431
+    Filtering for date: 2025-01-01
+    After date filter: 1,683
+    After NYC filter: 1,391
+
+  Adding derived columns...
+    ✓ year_month
+    ✓ sort_time
+    ✓ is_delayed_15
+    ✓ DayOfWeek
+    ✓ IsWeekend
+    ✓ IsPublicHoliday
+    ✓ processing_timestamp
+
+SAVING TO PARQUET
+  Output path: datamart/bronze/flight/bronze_flight_oot.parquet
+  Partitioning by: snapshot_date
+  Mode: overwrite
+  ✓ Parquet file saved successfully!
+
+VALIDATION CHECKS
+1. Total Rows: 1,391
+   ✓ PASS - Row count reasonable for daily data
+
+2. Date Range: 2025-01-01 to 2025-01-01
+   ✓ PASS - Single date as expected for daily data
+
+✓ Processing time: 0.8 minutes
+```
+
+#### **Step 3: Daily Inference Pipeline**
+
+```
+For each day (Day 1 to Day 90):
+
+  Bronze (1 day) 
+      ↓
+  Silver (features for 1 day)
+      ↓
+  Gold (merged with weather for 1 day)
+      ↓
+  Model Prediction (using trained model)
+      ↓
+  Compare vs True Label
+      ↓
+  Track Performance Metrics
+```
+
+#### **Step 4: Monthly Retraining (After 30 days)**
+
+After January 2025 completes:
+```bash
+# Option A: Process full month and append to historical
+# (To be implemented - for now, rerun historical with extended date range)
+
+# Option B: Manually merge OOT data into historical
+# (Consolidate January 2025 daily partitions into monthly partition)
+```
+
+---
+
+### **Performance Comparison**
+
+| Mode | Processing Time | Output Size | Use Case |
+|------|-----------------|-------------|----------|
+| **Historical Batch** | ~15 minutes | 15 MB (1M rows) | One-time training data load |
+| **Daily OOT** | <1 minute | ~10-50 KB (1K-2K rows) | Fast daily inference |
+
+---
+
+### **Daily Processing in Airflow (Future)**
+
+Example Airflow DAG for daily OOT processing:
+
+```python
+from airflow import DAG
+from airflow.operators.bash import BashOperator
+from datetime import datetime, timedelta
+
+default_args = {
+    'owner': 'flight_delay_team',
+    'start_date': datetime(2025, 1, 1),
+    'retries': 1,
+}
+
+with DAG(
+    'flight_delay_daily_oot',
+    default_args=default_args,
+    schedule_interval='@daily',
+    catchup=False
+) as dag:
+    
+    # Task 1: Process daily Bronze
+    bronze_task = BashOperator(
+        task_id='process_bronze',
+        bash_command='python main_static.py --snapshotdate {{ ds }}'
+    )
+    
+    # Task 2: Silver processing
+    silver_task = BashOperator(
+        task_id='process_silver',
+        bash_command='python main_silver.py --snapshotdate {{ ds }}'
+    )
+    
+    # Task 3: Gold processing
+    gold_task = BashOperator(
+        task_id='process_gold',
+        bash_command='python main_gold.py --snapshotdate {{ ds }}'
+    )
+    
+    # Task 4: Model inference
+    inference_task = BashOperator(
+        task_id='run_inference',
+        bash_command='python run_inference.py --snapshotdate {{ ds }}'
+    )
+    
+    # Task 5: Evaluate and monitor
+    evaluate_task = BashOperator(
+        task_id='evaluate_model',
+        bash_command='python evaluate.py --snapshotdate {{ ds }}'
+    )
+    
+    bronze_task >> silver_task >> gold_task >> inference_task >> evaluate_task
+```
+
+---
+
+### **OOT Validation Metrics**
+
+Track these metrics over 90 days:
+- **Daily accuracy**
+- **Daily precision/recall**
+- **Delay prediction accuracy**
+- **Model drift indicators**
+- **Performance degradation**
+
+---
+
+### **Troubleshooting Daily OOT**
+
+#### **Issue: CSV file not found**
+```
+ERROR: CSV file not found for date 2025-01-01: data/flight/oot/T_ONTIME_REPORTING-01_25.csv
+```
+**Solution**: Ensure OOT CSV files are in `data/flight/oot/` directory.
+
+#### **Issue: No flights for date**
+```
+WARNING: No flights found for 2025-01-01
+```
+**Solution**: Check if the date exists in the CSV file. Some dates may have no NYC flights.
+
+#### **Issue: Wrong date format**
+```
+ERROR: Invalid date format: 01-01-2025
+```
+**Solution**: Use format YYYY-MM-DD (e.g., 2025-01-01).
+
+---
+
+### **Command Reference**
+
+```bash
+# Historical batch (default)
+python main_static.py
+
+# Single day OOT
+python main_static.py --snapshotdate 2025-01-01
+
+# Help
+python main_static.py --help
+
+# Verify OOT Bronze
+ls -lh datamart/bronze/flight/bronze_flight_oot.parquet/
+
+# Count OOT partitions
+ls datamart/bronze/flight/bronze_flight_oot.parquet/ | grep snapshot_date | wc -l
+```
+
+---
+
 ## 👥 Team Collaboration
 
 ### **Parallel Development**

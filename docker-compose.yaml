@@ -32,6 +32,8 @@ services:
     - airflow_data:/opt/airflow
     - ./dags:/opt/airflow/dags
     - ./scripts:/opt/airflow/scripts
+    - ./datamart:/opt/airflow/datamart
+    - ./data:/opt/airflow/data
     ports:
     - 8080:8080
     command: webserver
@@ -50,6 +52,8 @@ services:
     - airflow_data:/opt/airflow
     - ./dags:/opt/airflow/dags
     - ./scripts:/opt/airflow/scripts
+    - ./datamart:/opt/airflow/datamart
+    - ./data:/opt/airflow/data
     command: scheduler
     restart: unless-stopped
     networks:

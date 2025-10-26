@@ -22,6 +22,8 @@ import argparse
 from datetime import datetime
 import pyspark
 from pyspark.sql import SparkSession
+import sys
+from pathlib import Path
 
 # Import our processing functions
 from utils.data_processing_flight_bronze import (
@@ -53,31 +55,19 @@ def main(snapshotdate=None):
         print(f"Mode: HISTORICAL BATCH")
     
     print("="*80 + "\n")
-    
-    # Initialize Spark session
-    print("Initializing Spark session...")
-    spark = SparkSession.builder \
-        .appName("FlightDelayBronze") \
-        .master("local[*]") \
-        .config("spark.sql.shuffle.partitions", "24") \
-        .config("spark.driver.memory", "4g") \
-        .config("spark.executor.memory", "4g") \
-        .getOrCreate()
-    
-    # Set log level to ERROR to reduce noise
-    spark.sparkContext.setLogLevel("ERROR")
-    print("✓ Spark session initialized\n")
+
+    # ----- Build paths relative to this file (stable regardless of CWD) -----
+    file_dir = Path(__file__).resolve().parent
+    repo_root = file_dir.parent  # adjust if your structure differs
     
     # Configuration - different paths for historical vs OOT
     if snapshotdate:
-        # DAILY OOT MODE
-        data_directory = "data/flight/oot/"  # OOT CSV files
-        bronze_output_path = "datamart/bronze/flight/bronze_flight_oot.parquet"
+        data_directory = "../data/flight/oot/" # OOT CSV files 
+        bronze_output_path = "../datamart/bronze/flight/bronze_flight_oot.parquet" 
         is_daily = True
     else:
-        # HISTORICAL BATCH MODE
-        data_directory = "data/flight/train/"  # Historical CSV files
-        bronze_output_path = "datamart/bronze/flight/bronze_flight_historical.parquet"
+        data_directory = "../data/flight/train/" # Historical CSV files 
+        bronze_output_path = "../datamart/bronze/flight/bronze_flight_historical.parquet" 
         is_daily = False
     
     # Check if data directory exists
@@ -93,9 +83,23 @@ def main(snapshotdate=None):
             print(f"  {data_directory}T_ONTIME_REPORTING-02_23.csv")
             print("  ...")
             print(f"  {data_directory}T_ONTIME_REPORTING-12_24.csv")
-        spark.stop()
+        sys.exit(1)  # non-zero -> task failure in Airflow
         return
+
+    # Initialize Spark session
+    print("Initializing Spark session...")
+    spark = SparkSession.builder \
+        .appName("FlightDelayBronze") \
+        .master("local[*]") \
+        .config("spark.sql.shuffle.partitions", "24") \
+        .config("spark.driver.memory", "4g") \
+        .config("spark.executor.memory", "4g") \
+        .getOrCreate()
     
+    # Set log level to ERROR to reduce noise
+    spark.sparkContext.setLogLevel("ERROR")
+    print("✓ Spark session initialized\n")
+
     # Print US federal holidays for review (only in historical mode)
     if not snapshotdate:
         print_holiday_list()

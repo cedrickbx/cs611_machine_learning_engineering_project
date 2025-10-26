@@ -1,5 +1,5 @@
 # Use the official Apache Airflow image (adjust the version as needed)
-FROM apache/airflow:2.6.1
+FROM apache/airflow:2.9.3-python3.11
 
 # Switch to root to install additional packages
 USER root
@@ -32,6 +32,9 @@ COPY requirements.txt ./
 
 # Switch to the airflow user before installing Python dependencies
 USER airflow
+
+# Always good: newer pip before installing
+RUN python -m pip install --upgrade pip
 
 # Install Python dependencies using requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt

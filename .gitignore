@@ -172,6 +172,18 @@ cython_debug/
 
 # data
 *.csv
+*.parquet
+*.parquet/
+
+# Data directories - ignore contents but keep folder structure
+data/flight/train/*.csv
+data/flight/oot/*.csv
+data/flight/**/*.csv
+
+# Datamart outputs - ignore all parquet outputs
+datamart/bronze/**
+datamart/silver/**
+datamart/gold/**
 
 # mac
 .DS_Store

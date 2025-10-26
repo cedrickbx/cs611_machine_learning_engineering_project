@@ -30,6 +30,11 @@ from utils.data_processing_flight_bronze import (
     print_holiday_list
 )
 
+# Adding Silver layer imports:
+from utils.data_processing_flight_silver import (
+    process_bronze_to_silver,
+    validate_silver_parquet
+)
 
 def main(snapshotdate=None):
     """
@@ -69,15 +74,20 @@ def main(snapshotdate=None):
     print("✓ Spark session initialized\n")
     
     # Configuration - different paths for historical vs OOT
+    
+    
+    
     if snapshotdate:
         # DAILY OOT MODE
         data_directory = "data/flight/oot/"  # OOT CSV files
         bronze_output_path = "datamart/bronze/flight/bronze_flight_oot.parquet"
+        silver_output_path = "datamart/silver/flight/silver_flight_oot.parquet"
         is_daily = True
     else:
         # HISTORICAL BATCH MODE
         data_directory = "data/flight/train/"  # Historical CSV files
         bronze_output_path = "datamart/bronze/flight/bronze_flight_historical.parquet"
+        silver_output_path = "datamart/silver/flight/silver_flight_historical.parquet"
         is_daily = False
     
     # Check if data directory exists
@@ -110,45 +120,68 @@ def main(snapshotdate=None):
             output_mode='overwrite'
         )
         
-        # Validate outputs
-        validation_results = validate_bronze_parquet(
+        # Validate Bronze outputs
+        bronze_validation = validate_bronze_parquet(
             bronze_output_path=bronze_output_path,
+            spark=spark,
+            is_daily=is_daily
+        )
+        
+        # PROCESS BRONZE TO SILVER
+        print("\n" + "="*80)
+        print("PROCESSING SILVER LAYER")
+        print("="*80 + "\n")
+        
+        df_silver = process_bronze_to_silver(
+            bronze_path=bronze_output_path,
+            silver_output_path=silver_output_path,
+            spark=spark,
+            snapshot_date=snapshotdate,
+            output_mode='overwrite'
+        )
+        
+        # Validate Silver outputs
+        silver_validation = validate_silver_parquet(
+            silver_output_path=silver_output_path,
             spark=spark,
             is_daily=is_daily
         )
         
         # Final summary
         elapsed_time = time.time() - start_time
+
         
         print("\n" + "="*80)
-        print("PROCESSING COMPLETE")
+        print("PROCESSING COMPLETE - BRONZE → SILVER")
         print("="*80)
-        print(f"\n✓ Bronze Parquet created: {bronze_output_path}")
-        print(f"✓ Total rows: {validation_results.get('total_rows', 'N/A'):,}")
-        print(f"✓ Date range: {validation_results.get('min_date', 'N/A')} to {validation_results.get('max_date', 'N/A')}")
-        print(f"✓ Processing time: {elapsed_time/60:.1f} minutes")
-        
+        print(f"\n✓ Bronze Parquet: {bronze_output_path}")
+        print(f"  - Total rows: {bronze_validation.get('total_rows', 'N/A'):,}")
+        print(f"  - Date range: {bronze_validation.get('min_date', 'N/A')} to {bronze_validation.get('max_date', 'N/A')}")
+        print(f"\n✓ Silver Parquet: {silver_output_path}")
+        print(f"  - Total rows: {silver_validation.get('total_rows', 'N/A'):,}")
+        print(f"\n✓ Total processing time: {elapsed_time/60:.1f} minutes")
         print("\n" + "="*80)
         print("NEXT STEPS")
         print("="*80)
         
         if snapshotdate:
             # Daily OOT mode
-            print(f"\n✓ Daily Bronze created for {snapshotdate}")
+            print(f"\n✓ Daily Bronze → Silver created for {snapshotdate}")
             print("\nNext:")
-            print("1. Process to Silver layer (feature engineering)")
-            print("2. Process to Gold layer (join with weather)")
-            print("3. Run model inference")
-            print("4. Compare prediction vs actual label")
+            print("1. Process to Gold layer (join with weather)")
+            print("2. Run model inference")
+            print("3. Compare prediction vs actual label")
             print("\nTo process next day:")
             print(f"  python main_static.py --snapshotdate YYYY-MM-DD")
         else:
             # Historical mode
             print("\n1. Review holiday list above to verify accuracy")
-            print("2. Inspect Parquet file:")
-            print(f"   ls -lh {bronze_output_path}/")
-            print("\n3. Next: Build XGBoost model using this Bronze data")
-            print("\n4. Later: Process OOT data daily with --snapshotdate flag")
+            print("2. Inspect Parquet files:")
+            print(f"   Bronze: ls -lh {bronze_output_path}/")
+            print(f"   Silver: ls -lh {silver_output_path}/")
+            print("\n3. Next: Process to Gold layer (feature engineering + weather join)")
+            print("\n4. Then: Build XGBoost model using Silver/Gold data")
+            print("\n5. Later: Process OOT data daily with --snapshotdate flag")
         
         print("\n" + "="*80 + "\n")
         

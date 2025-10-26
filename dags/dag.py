@@ -17,6 +17,80 @@ default_args = {
 
 SCRIPTS_DIR = "/opt/airflow/scripts"
 FLIGHT_BRONZE_SCRIPT = "bronze_flight_store.py"
+weather_history_bronze_script = "bronze_weather_store.py"
+forecast_script = "bronze_forecast_store.py"
+
+with DAG(
+    dag_id="stage_training_and_oot_weather_forecast",
+    description="One-off: stage training (2023-2024) + initial OOT (range) for weather & forecast Bronze",
+    start_date=datetime(2025, 1, 1),
+    schedule_interval=None,     # manual trigger only
+    catchup=False,              # no auto backfills
+    default_args=default_args,
+    tags=["bronze", "staging", "backfill", "weather", "forecast"],
+) as dag:
+
+    start = EmptyOperator(task_id="start")
+
+    # ------------------------------
+    # Group 1: Weather history
+    # ------------------------------
+    with TaskGroup(group_id="weather_history") as tg_weather:
+
+        # 1A) Ensure raws 2023–2025 exist; also write historical parquet (2023–2024)
+        #    --download-data makes the script fetch NOAA ISD CSVs if missing.
+        weather_download_and_hist = BashOperator(
+            task_id="weather_download_and_hist",
+            bash_command=(
+                "set -euo pipefail && "
+                f"cd {SCRIPTS_DIR} && "
+                # Writes historical parquet and downloads raws 2023–2025 if needed
+                f"python3 {weather_history_bronze_script} --download-data"
+            ),
+        )
+
+        # 1B) Backfill OOT weather history for a date RANGE (named file per day)
+        # Read dates from dag_run.conf; fall back to sensible defaults if not provided.
+        # This calls your existing writer in 'range' mode and skips re-writing historical.
+        weather_oot_range = BashOperator(
+            task_id="weather_oot_range",
+            bash_command=(
+                "set -euo pipefail && "
+                f"cd {SCRIPTS_DIR} && "
+                f"python3 {weather_history_bronze_script} "
+                "--oot-start '{{ dag_run.conf.get(\"oot_start\", \"2025-01-01\") }}' "
+                "--oot-end   '{{ dag_run.conf.get(\"oot_end\",   \"2025-03-31\") }}' "
+                "--no-hist --download-data"
+            ),
+        )
+
+        weather_download_and_hist >> weather_oot_range
+
+    # ------------------------------
+    # Group 2: Forecast (GFS)
+    # ------------------------------
+    with TaskGroup(group_id="gfs_forecast") as tg_forecast:
+
+        # 2A) Backfill OOT forecasts for the SAME date range (per valid_date file)
+        # You can trim cycles/leads for speed; these are balanced defaults.
+        forecast_oot_range = BashOperator(
+            task_id="forecast_oot_range",
+            bash_command=(
+                "set -euo pipefail && "
+                f"cd {SCRIPTS_DIR} && "
+                f"python3 {forecast_script} "
+                "--oot-start '{{ dag_run.conf.get(\"oot_start\", \"2025-01-01\") }}' "
+                "--oot-end   '{{ dag_run.conf.get(\"oot_end\",   \"2025-03-31\") }}' "
+                "--cycles 0,12 --fhours 6,12,24,48,72 "
+                "--out datamart/bronze/gfs_airports "
+                "--no-hist"
+            ),
+        )
+
+    done = EmptyOperator(task_id="done", trigger_rule=TriggerRule.ALL_DONE)
+
+    # Orchestrate: download/write history -> OOT weather + OOT forecast in parallel -> done
+    start >> tg_weather >> [tg_forecast] >> done
 
 # ====================================================================
 # DAG: monthly data pipeline (kept as-is, now includes Flight Bronze OOT)
@@ -71,6 +145,44 @@ with DAG(
 
         flight_bronze_oot_done = EmptyOperator(task_id="flight_bronze_oot_done")
         dep_check_flight_oot >> run_bronze_flight_oot >> flight_bronze_oot_done
+
+    # -------------------------
+    # Weather History Bronze (OOT) — runs each schedule with ds
+    # -------------------------
+    with TaskGroup(group_id="flight_weather_oot") as flight_weather_oot:
+        dep_check_weather_oot = EmptyOperator(task_id="dep_check_weather_oot")
+
+        run_bronze_weather_infer = BashOperator(
+            task_id='run_bronze_weather_infer',
+            bash_command=(
+                'set -euo pipefail && '
+                f'cd {SCRIPTS_DIR} && '
+                f'python3 {weather_history_bronze_script} '
+                '--snapshotdate "{{ ds }}" --nohist --download-data'
+            ),
+        )
+
+        flight_weather_oot_done = EmptyOperator(task_id="weather_bronze_oot_done")
+        dep_check_weather_oot >> run_bronze_weather_infer >> flight_weather_oot_done
+
+    # -------------------------
+    # Forecast History Bronze (OOT) — runs each schedule with ds
+    # -------------------------
+    with TaskGroup(group_id="flight_weather_oot") as flight_forecast_oot:
+        dep_check_forecast_oot = EmptyOperator(task_id="dep_check_forecast_oot")
+
+        run_bronze_forecast_infer = BashOperator(
+            task_id="run_bronze_forecast_infer",
+            bash_command=(
+                "set -euo pipefail && "
+                f"cd {SCRIPTS_DIR} && "
+                "python3 bronze_forecast_store.py "
+                f"--oot-start '{{ ds }}' --oot-end '{{ ds }}' "
+                "--no-hist"
+            ),
+        )
+        flight_forecast_oot_done = EmptyOperator(task_id="forecast_bronze_oot_done")
+        dep_check_forecast_oot >> run_bronze_forecast_infer >> flight_forecast_oot_done
 
     # -------------------------
     # Feature Store (now depends on Flight Bronze OOT)

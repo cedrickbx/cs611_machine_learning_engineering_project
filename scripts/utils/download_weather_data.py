@@ -12,7 +12,7 @@ target_stations = {
 }
 
 BUCKET_NAME = "noaa-global-hourly-pds"
-LOCAL_BASE_DIR = "data/weather_history"
+LOCAL_BASE_DIR = "../../data/weather_history"
 
 #check if file exists before proceeding
 def s3_key_exists(s3_client, bucket: str, key: str) -> bool:
@@ -98,5 +98,6 @@ def download_noaa_isd_data(start_year=2023, end_year=2025):
 
     return missing_by_station, stations_with_missing
 
-if __name__ == "__main__":
-    download_noaa_isd_data()
+#use if running as script
+# if __name__ == "__main__":
+#     download_noaa_isd_data()

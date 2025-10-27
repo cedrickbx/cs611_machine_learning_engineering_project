@@ -55,10 +55,6 @@ def main(snapshotdate=None):
         print(f"Mode: HISTORICAL BATCH")
     
     print("="*80 + "\n")
-
-    # ----- Build paths relative to this file (stable regardless of CWD) -----
-    file_dir = Path(__file__).resolve().parent
-    repo_root = file_dir.parent  # adjust if your structure differs
     
     # Configuration - different paths for historical vs OOT
     if snapshotdate:

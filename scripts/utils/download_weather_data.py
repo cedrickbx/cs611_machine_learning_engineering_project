@@ -12,7 +12,7 @@ target_stations = {
 }
 
 BUCKET_NAME = "noaa-global-hourly-pds"
-LOCAL_BASE_DIR = "../../data/weather_history"
+LOCAL_BASE_DIR = "../data/weather_history"
 
 #check if file exists before proceeding
 def s3_key_exists(s3_client, bucket: str, key: str) -> bool:

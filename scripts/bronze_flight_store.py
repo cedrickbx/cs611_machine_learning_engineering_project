@@ -56,14 +56,18 @@ def main(snapshotdate=None):
     
     print("="*80 + "\n")
     
-    # Configuration - different paths for historical vs OOT
+    # ------------------------------------------------------------------
+    # Paths (separate output; OOT includes the date in the filename)
+    # ------------------------------------------------------------------
     if snapshotdate:
-        data_directory = "../data/flight/oot/" # OOT CSV files 
-        bronze_output_path = "../datamart/bronze/flight/bronze_flight_oot.parquet" 
+        data_directory = "../data/flight/oot/"   # OOT CSV files
+        # NEW: bake date into filename to avoid overwriting previous OOTs
+        snap_tag = snapshotdate.replace("-", "_")
+        bronze_output_path = f"../datamart/bronze/flight/bronze_flight_oot_{snap_tag}.parquet"
         is_daily = True
     else:
-        data_directory = "../data/flight/train/" # Historical CSV files 
-        bronze_output_path = "../datamart/bronze/flight/bronze_flight_historical.parquet" 
+        data_directory = "../data/flight/train/" # Historical CSV files
+        bronze_output_path = "../datamart/bronze/flight/bronze_flight_historical.parquet"
         is_daily = False
     
     # Check if data directory exists

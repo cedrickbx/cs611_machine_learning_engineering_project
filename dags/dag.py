@@ -24,7 +24,7 @@ WEATHER_SCRIPT       = "bronze_weather_store.py"
 FORECAST_SCRIPT      = "bronze_forecast_store.py"
 
 # Writable directories inside the Airflow container
-RAW_WEATHER_DIR     = "/opt/airflow/data/noaa_isd"
+RAW_WEATHER_DIR     = "/opt/airflow/data/weather_history"
 WEATHER_PARQUET_DIR = "/opt/airflow/datamart/bronze/weather_history"
 WEATHER_FORECAST_OUT_DIR         = "/opt/airflow/datamart/bronze/forecast"
 

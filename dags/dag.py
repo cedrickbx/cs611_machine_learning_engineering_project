@@ -1,8 +1,14 @@
 from airflow import DAG
 from airflow.operators.bash import BashOperator
-from airflow.operators.dummy import DummyOperator
+from airflow.operators.empty import EmptyOperator
+from airflow.utils.task_group import TaskGroup
+from airflow.utils.trigger_rule import TriggerRule
+from airflow.operators.python import ShortCircuitOperator
 from datetime import datetime, timedelta
 
+# --------------------------------------------------------------------
+# Global defaults
+# --------------------------------------------------------------------
 default_args = {
     'owner': 'airflow',
     'depends_on_past': False,
@@ -10,111 +16,175 @@ default_args = {
     'retry_delay': timedelta(minutes=5),
 }
 
+SCRIPTS_DIR = "/opt/airflow/scripts"
+
+# Scripts
+FLIGHT_BRONZE_SCRIPT = "bronze_flight_store.py"
+WEATHER_SCRIPT       = "bronze_weather_store.py"
+FORECAST_SCRIPT      = "bronze_forecast_store.py"
+
+# Writable directories inside the Airflow container
+RAW_WEATHER_DIR     = "/opt/airflow/data/weather_history"
+WEATHER_PARQUET_DIR = "/opt/airflow/datamart/bronze/weather_history"
+WEATHER_FORECAST_OUT_DIR         = "/opt/airflow/datamart/bronze/forecast"
+
+
 with DAG(
-    'dag',
+    dag_id="bronze_data_preparation_pipeline",
+    description="Batch Bronze: Historical Flight + Weather (2023–2024) and separate OOT branch for Weather/Forecast.",
+    start_date=datetime(2025, 1, 1),
+    schedule_interval=None,              # manual trigger
+    catchup=False,
+    max_active_runs=1,
+    render_template_as_native_obj=True,
     default_args=default_args,
-    description='data pipeline run once a month',
-    schedule_interval='0 0 1 * *',  # At 00:00 on day-of-month 1
-    start_date=datetime(2023, 1, 1),
-    end_date=datetime(2024, 12, 1),
-    catchup=True,
+    tags=["bronze", "prep", "flight", "weather", "forecast"],
+    params={
+        "run_hist": False,
+        "run_oot": True,
+        # Historical controls (you can widen if scripts support it)
+        "hist_weather_download": True,   # set False to skip raw downloads
+        # OOT controls
+        "oot_start": "2025-01-01",
+        "oot_end":   "2025-01-01",
+        #"oot_end":   "2025-03-31",
+        "oot_cycles": "0,12",
+        "oot_fhours": "6,12,24,48,72",
+    },
 ) as dag:
 
-    # data pipeline
+    start = EmptyOperator(task_id="start")
+    done  = EmptyOperator(task_id="done", trigger_rule=TriggerRule.ALL_DONE)
 
-    # --- label store ---
+    # ==========================================================
+    # BRANCH A — HISTORICAL (one-shot): Flight + Weather 2023–2024
+    # ==========================================================
+    with TaskGroup(group_id="historical_bronze") as tg_hist:
 
-    dep_check_source_label_data = DummyOperator(task_id="dep_check_source_label_data")
+        # 1A) Ensure raws 2023–2025 exist; also write historical parquet (2023–2024)
+        #    --download-data makes the script fetch NOAA ISD CSVs if missing.
+        weather_hist = BashOperator(
+            task_id="weather_hist",
+            bash_command=(
+                "set -euxo pipefail && "
+                f"mkdir -p {RAW_WEATHER_DIR} {WEATHER_PARQUET_DIR} && "
+                f"cd {SCRIPTS_DIR} && "
+                # --download-data guarded by param
+                "EXTRA='' ; "
+                "if [ '{{ params.hist_weather_download }}' = 'True' ]; then EXTRA='--download-data'; fi ; "
+                f"python3 {WEATHER_SCRIPT} $EXTRA"
+            ),
+            env={
+                "NOAA_DATA_DIR": RAW_WEATHER_DIR,
+                "WEATHER_PARQUET_DIR": WEATHER_PARQUET_DIR,
+            },
+        )
 
-    bronze_label_store = BashOperator(
-        task_id='run_bronze_label_store',
-        bash_command=(
-            'cd /opt/airflow/scripts && '
-            'python3 bronze_label_store.py '
-            '--snapshotdate "{{ ds }}"'
-        ),
+        # Flight historical: no --snapshotdate to run the full batch (2023–2024) as your script supports
+        flight_hist = BashOperator(
+            task_id="flight_hist",
+            bash_command=(
+                "set -euxo pipefail && "
+                f"cd {SCRIPTS_DIR} && "
+                f"python3 {FLIGHT_BRONZE_SCRIPT}"
+            ),
+        )
+
+        # Run both in parallel; if you prefer sequencing, chain them
+        [weather_hist, flight_hist]
+
+    # ==========================================================
+    # BRANCH B — OOT RANGE (separate branch): Weather + Forecast
+    # ==========================================================
+    # ------------------ OOT BRANCH (MANUAL GATE) ------------------
+    # Gate: only run OOT when params.run_oot == True
+    def flag(ctx_key, default=False, **context):
+        v = context["params"].get(ctx_key, default)
+        return str(v).strip().lower() in {"1","true","t","yes","y","on"}
+
+    hist_gate = ShortCircuitOperator(
+        task_id="hist_gate",
+        python_callable=lambda **ctx: flag("run_hist", True, **ctx),
     )
 
-    silver_label_store = DummyOperator(task_id="silver_label_store")
-
-    gold_label_store = DummyOperator(task_id="gold_label_store")
-
-    label_store_completed = DummyOperator(task_id="label_store_completed")
-
-    # Define task dependencies to run scripts sequentially
-    dep_check_source_label_data >> bronze_label_store >> silver_label_store >> gold_label_store >> label_store_completed
- 
- 
-    # --- feature store ---
-    dep_check_source_data_bronze_1 = DummyOperator(task_id="dep_check_source_data_bronze_1")
-
-    dep_check_source_data_bronze_2 = DummyOperator(task_id="dep_check_source_data_bronze_2")
-
-    dep_check_source_data_bronze_3 = DummyOperator(task_id="dep_check_source_data_bronze_3")
-
-    bronze_table_1 = DummyOperator(task_id="bronze_table_1")
+    oot_gate = ShortCircuitOperator(
+        task_id="oot_gate",
+        python_callable=lambda **ctx: flag("run_oot", False, **ctx),
+    )
     
-    bronze_table_2 = DummyOperator(task_id="bronze_table_2")
+    with TaskGroup(group_id="oot_bronze") as tg_oot:
 
-    bronze_table_3 = DummyOperator(task_id="bronze_table_3")
+        flight_oot_range = BashOperator(
+            task_id="flight_oot_range",
+            bash_command=(
+                "set -euxo pipefail && "
+                f"cd {SCRIPTS_DIR} && "
+                "while read -r DS; do "
+                f"  python3 {FLIGHT_BRONZE_SCRIPT} --snapshotdate \"$DS\"; "
+                "done < <(python3 - <<'PY'\n"
+                "from datetime import datetime, timedelta\n"
+                "s='{{ params.oot_start }}'.strip()\n"
+                "e='{{ params.oot_end | default(params.oot_start) }}'.strip()\n"
+                "S=datetime.fromisoformat(s)\n"
+                "E=datetime.fromisoformat(e)\n"
+                "if E < S: S, E = E, S  # swap if user inverted\n"
+                "d=S\n"
+                "while d <= E:\n"
+                "    print(d.strftime('%Y-%m-%d'))\n"
+                "    d += timedelta(days=1)\n"
+                "PY\n"
+                ")"
+            ),
+        )
 
-    silver_table_1 = DummyOperator(task_id="silver_table_1")
+        # 1B) Backfill OOT weather history for a date RANGE (named file per day)
+        # Read dates from dag_run.conf; fall back to sensible defaults if not provided.
+        # This calls your existing writer in 'range' mode and skips re-writing historical.
+        weather_oot_range = BashOperator(
+            task_id="weather_oot_range",
+            bash_command=(
+                "set -euxo pipefail && "
+                f"mkdir -p {RAW_WEATHER_DIR} {WEATHER_PARQUET_DIR} && "
+                f"cd {SCRIPTS_DIR} && "
+                f"python3 {WEATHER_SCRIPT} "
+                "--oot-start '{{ params.oot_start }}' "
+                "--oot-end   '{{ params.oot_end | default(params.oot_start) }}' "
+                "--no-hist --download-data"
+            ),
+            env={
+                "NOAA_DATA_DIR": RAW_WEATHER_DIR,
+                "WEATHER_PARQUET_DIR": WEATHER_PARQUET_DIR,
+            },
+        )
 
-    silver_table_2 = DummyOperator(task_id="silver_table_2")
+        # 2A) Backfill OOT forecasts for the SAME date range (per valid_date file)
+        # You can trim cycles/leads for speed; these are balanced defaults.
+        forecast_oot_range = BashOperator(
+            task_id="forecast_oot_range",
+            bash_command=(
+                "set -euxo pipefail && "
+                f"mkdir -p {WEATHER_FORECAST_OUT_DIR} && "
+                f"cd {SCRIPTS_DIR} && "
+                f"python3 {FORECAST_SCRIPT} "
+                "--oot-start '{{ params.oot_start }}' "
+                "--oot-end   '{{ params.oot_end | default(params.oot_start) }}' "
+                "--cycles {{ params.oot_cycles }} "
+                "--fhours {{ params.oot_fhours }} "
+                f"--out {WEATHER_FORECAST_OUT_DIR} "
+                "--no-hist"
+            ),
+        )
 
-    gold_feature_store = DummyOperator(task_id="gold_feature_store")
+        # Run all three OOT tasks in parallel (after the group-level gate/deps)
+        #weather_hist >> weather_oot_range
 
-    feature_store_completed = DummyOperator(task_id="feature_store_completed")
-    
-    # Define task dependencies to run scripts sequentially
-    dep_check_source_data_bronze_1 >> bronze_table_1 >> silver_table_1 >> gold_feature_store
-    dep_check_source_data_bronze_2 >> bronze_table_2 >> silver_table_1 >> gold_feature_store
-    dep_check_source_data_bronze_3 >> bronze_table_3 >> silver_table_2 >> gold_feature_store
-    gold_feature_store >> feature_store_completed
+        # Parallel OOT: weather + forecast
+        [weather_oot_range, forecast_oot_range, flight_oot_range]
 
+    # -------- Orchestration with dependency --------
+    # Start -> HIST (weather & flight in parallel)
+    start >> hist_gate >> tg_hist
+    start >> oot_gate >> tg_oot
 
-    # --- model inference ---
-    model_inference_start = DummyOperator(task_id="model_inference_start")
-
-    model_1_inference = DummyOperator(task_id="model_1_inference")
-
-    model_2_inference = DummyOperator(task_id="model_2_inference")
-
-    model_inference_completed = DummyOperator(task_id="model_inference_completed")
-    
-    # Define task dependencies to run scripts sequentially
-    feature_store_completed >> model_inference_start
-    model_inference_start >> model_1_inference >> model_inference_completed
-    model_inference_start >> model_2_inference >> model_inference_completed
-
-
-    # --- model monitoring ---
-    model_monitor_start = DummyOperator(task_id="model_monitor_start")
-
-    model_1_monitor = DummyOperator(task_id="model_1_monitor")
-
-    model_2_monitor = DummyOperator(task_id="model_2_monitor")
-
-    model_monitor_completed = DummyOperator(task_id="model_monitor_completed")
-    
-    # Define task dependencies to run scripts sequentially
-    model_inference_completed >> model_monitor_start
-    model_monitor_start >> model_1_monitor >> model_monitor_completed
-    model_monitor_start >> model_2_monitor >> model_monitor_completed
-
-
-    # --- model auto training ---
-
-    model_automl_start = DummyOperator(task_id="model_automl_start")
-    
-    model_1_automl = DummyOperator(task_id="model_1_automl")
-
-    model_2_automl = DummyOperator(task_id="model_2_automl")
-
-    model_automl_completed = DummyOperator(task_id="model_automl_completed")
-    
-    # Define task dependencies to run scripts sequentially
-    feature_store_completed >> model_automl_start
-    label_store_completed >> model_automl_start
-    model_automl_start >> model_1_automl >> model_automl_completed
-    model_automl_start >> model_2_automl >> model_automl_completed
+    # Finish when HIST (both tasks) and OOT (both tasks) are done
+    [tg_hist, tg_oot] >> done

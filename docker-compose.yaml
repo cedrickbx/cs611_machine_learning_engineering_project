@@ -10,9 +10,6 @@ services:
     - airflow_data:/opt/airflow
     - ./dags:/opt/airflow/dags
     - ./scripts:/opt/airflow/scripts
-    - ./data:/opt/airflow/data
-    - ./datamart:/opt/airflow/datamart
-
     entrypoint: '/bin/bash -c " airflow db init && airflow users create --username
       admin --password admin --firstname Admin --lastname User --role Admin --email
       admin@example.com || true"
@@ -35,9 +32,8 @@ services:
     - airflow_data:/opt/airflow
     - ./dags:/opt/airflow/dags
     - ./scripts:/opt/airflow/scripts
-    - ./data:/opt/airflow/data
     - ./datamart:/opt/airflow/datamart
-
+    - ./data:/opt/airflow/data
     ports:
     - 8080:8080
     command: webserver
@@ -56,9 +52,8 @@ services:
     - airflow_data:/opt/airflow
     - ./dags:/opt/airflow/dags
     - ./scripts:/opt/airflow/scripts
-    - ./data:/opt/airflow/data
     - ./datamart:/opt/airflow/datamart
-
+    - ./data:/opt/airflow/data
     command: scheduler
     restart: unless-stopped
     networks:
@@ -86,4 +81,3 @@ networks:
     driver: bridge
 configs: {}
 secrets: {}
-

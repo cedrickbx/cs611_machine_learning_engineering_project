@@ -1,0 +1,29 @@
+# Core scientific stack
+numpy==2.2.2
+pandas==2.2.3
+matplotlib==3.10.0
+seaborn==0.13.2
+
+# ML
+scikit-learn==1.5.2
+xgboost>=2.1.0,<3.0.0
+
+# Spark
+pyspark==3.5.5
+pyarrow>=14.0.0,<19.0.0
+
+# Xarray + IO/compute (NumPy 2.x–compatible)
+xarray>=2024.10.0,<2026.0.0
+dask[array]>=2024.10.0,<2026.0.0
+cftime>=1.6.4
+netCDF4>=1.7.0
+fsspec>=2024.6.0
+
+# GRIB + Herbie
+cfgrib>=0.9.14.0           # needs system ecCodes
+herbie-data>=2024.3,<2026  # Herbie (xarray-friendly GRIB downloader)
+aiohttp>=3.9                # used by Herbie for async downloads
+
+# Utilities
+holidays==0.58
+jupyterlab==4.3.5

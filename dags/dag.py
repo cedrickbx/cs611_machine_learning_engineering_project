@@ -5,6 +5,7 @@ from airflow.utils.task_group import TaskGroup
 from airflow.utils.trigger_rule import TriggerRule
 from airflow.operators.python import ShortCircuitOperator
 from datetime import datetime, timedelta
+import os
 
 # --------------------------------------------------------------------
 # Global defaults
@@ -19,15 +20,26 @@ default_args = {
 SCRIPTS_DIR = "/opt/airflow/scripts"
 
 # Scripts
-FLIGHT_BRONZE_SCRIPT = "bronze_flight_store.py"
-WEATHER_SCRIPT       = "bronze_weather_store.py"
-FORECAST_SCRIPT      = "bronze_forecast_store.py"
+## Bronze table store
+FLIGHT_BRONZE_SCRIPT    = "bronze_flight_store.py"
+WEATHER_SCRIPT          = "bronze_weather_store.py"
+FORECAST_SCRIPT         = "bronze_forecast_store.py"
+AIRPORT_BRONZE_SCRIPT   = "bronze_airport_store.py"
+
+## Silver table store
+AIRPORT_SILVER_SCRIPT   = "silver_airport_store.py"
 
 # Writable directories inside the Airflow container
-RAW_WEATHER_DIR     = "/opt/airflow/data/weather_history"
-WEATHER_PARQUET_DIR = "/opt/airflow/datamart/bronze/weather_history"
-WEATHER_FORECAST_OUT_DIR         = "/opt/airflow/datamart/bronze/forecast"
+## Read Data
+RAW_WEATHER_DIR         = "/opt/airflow/data/weather_history"
+AIRPORTS_CSV            = "/opt/airflow/data/airports/airports.csv"
+AIRPORT_FREQS_CSV       = "/opt/airflow/data/airports/airport-frequencies.csv"
 
+## Store in datamart dir
+WEATHER_PARQUET_DIR           = "/opt/airflow/datamart/bronze/weather_history"
+WEATHER_FORECAST_OUT_DIR      = "/opt/airflow/datamart/bronze/forecast"
+AIRPORT_BRONZE_DIR            = "/opt/airflow/datamart/bronze/airport"
+AIRPORT_SILVER_DIR            = "/opt/airflow/datamart/silver/airport"
 
 with DAG(
     dag_id="bronze_data_preparation_pipeline",
@@ -42,14 +54,21 @@ with DAG(
     params={
         "run_hist": False,
         "run_oot": True,
+        
         # Historical controls (you can widen if scripts support it)
         "hist_weather_download": True,   # set False to skip raw downloads
+        
         # OOT controls
         "oot_start": "2025-01-01",
         "oot_end":   "2025-01-01",
         #"oot_end":   "2025-03-31",
         "oot_cycles": "0,12",
         "oot_fhours": "6,12,24,48,72",
+
+        # Airports Params controls
+        "airport_freq_types": "TWR,APP,A/D,ATIS,AWOS,GND",  # set airports facilities
+        "airport_scheduled_only": "true",
+        "airport_subset_iata": "JFK,LGA,EWR",               # selected airports 
     },
 ) as dag:
 
@@ -181,10 +200,108 @@ with DAG(
         # Parallel OOT: weather + forecast
         [weather_oot_range, forecast_oot_range, flight_oot_range]
 
+    # =============================================================
+    # BRANCH C — AIRPORTS (reference) — Bronze → Silver (one-shot)
+    # =============================================================
+    # What it does:
+    #   - Ingest two static reference CSVs (airports & airport_frequencies)
+    #     into Bronze as Parquet (no business transforms, metadata columns only).
+    #   - Build the Silver-level canonical airport dimension (US-wide wide table
+    #     with has_* flags; optional IATA subset if your script supports).
+    #
+    # Why here & when to run:
+    #   - Airports are static/slow-moving reference data → not part of OOT.
+    #   - Run once (or ad-hoc when the CSVs update). Downstream facts (Flight/Weather)
+    #     can join this dimension later in Silver/Gold.
+    # =============================================================
+
+    with TaskGroup(group_id="airports_ref") as tg_airports:
+
+        # --- Short Circuit: skip airports pipeline if airport_silver already exists ---
+        airports_ready = ShortCircuitOperator(
+            task_id="airports_ready",
+            python_callable=lambda: not os.path.exists(AIRPORT_SILVER_DIR),
+        )
+
+        # # 1) Bronze load (two CSVs → two Parquet folders):
+        # #    The Bronze script should internally call your process_bronze_airports_table(...)
+        # airports_bronze = BashOperator(
+        #     task_id="airports_bronze",
+        #     bash_command=(
+        #         "set -euxo pipefail && "
+        #         f"mkdir -p {AIRPORT_BRONZE_DIR} && "
+        #         f"cd {SCRIPTS_DIR} && "
+                
+        #         # First: airports.csv
+        #         f"python3 {AIRPORT_BRONZE_SCRIPT} "
+        #         f"--csv '{AIRPORTS_CSV}' "
+        #         f"--bronze-dir '{AIRPORT_BRONZE_DIR}' "
+        #         "--table airports --mode overwrite && "
+                
+        #         # Second: airport-frequencies.csv
+        #         f"python3 {AIRPORT_BRONZE_SCRIPT} "
+        #         f"--csv '{AIRPORT_FREQS_CSV}' "
+        #         f"--bronze-dir '{AIRPORT_BRONZE_DIR}' "
+        #         "--table airport_frequencies --mode overwrite"
+        #     ),
+        # )
+
+        airports_bronze_airports = BashOperator(
+            task_id="airports_bronze_airports",
+            bash_command=(
+                "set -euxo pipefail\n"
+                f"test -f '{AIRPORTS_CSV}' || (echo 'MISSING: {AIRPORTS_CSV}' && exit 1)\n"
+                f"mkdir -p '{AIRPORT_BRONZE_DIR}'\n"
+                f"cd '{SCRIPTS_DIR}'\n"
+                f"python3 {AIRPORT_BRONZE_SCRIPT} "
+                f"--csv '{AIRPORTS_CSV}' "
+                f"--bronze-dir '{AIRPORT_BRONZE_DIR}' "
+                "--table airports --mode overwrite\n"
+            ),
+        )
+
+        airports_bronze_freqs = BashOperator(
+            task_id="airports_bronze_freqs",
+            bash_command=(
+                "set -euxo pipefail\n"
+                f"test -f '{AIRPORT_FREQS_CSV}' || (echo 'MISSING: {AIRPORT_FREQS_CSV}' && exit 1)\n"
+                f"mkdir -p '{AIRPORT_BRONZE_DIR}'\n"
+                f"cd '{SCRIPTS_DIR}'\n"
+                f"python3 {AIRPORT_BRONZE_SCRIPT} "
+                f"--csv '{AIRPORT_FREQS_CSV}' "
+                f"--bronze-dir '{AIRPORT_BRONZE_DIR}' "
+                "--table airport_frequencies --mode overwrite\n"
+            ),
+        )
+
+        # 2) Silver build (canonicalized wide dim from Bronze):
+        #    Reads Bronze Parquet (airports, airport_frequencies), produces
+        #    - silver/airport/US_airports/ (wide dim with arrays + has_* flags)
+        #    - optional IATA subset (e.g., silver/airport/new_york/) if your script supports --iata
+        airports_silver = BashOperator(
+            task_id="airports_silver",
+            bash_command=(
+                "set -euxo pipefail && "
+                f"mkdir -p {AIRPORT_SILVER_DIR} && "
+                f"cd {SCRIPTS_DIR} && "
+                f"python3 {AIRPORT_SILVER_SCRIPT} "
+                f"--bronze-dir '{AIRPORT_BRONZE_DIR}' "
+                f"--silver-dir '{AIRPORT_SILVER_DIR}'"
+                # Append if needed:
+                # " --iata 'JFK,LGA,EWR'"
+            ),
+        )
+
+        # Bronze → Silver for Airports
+        # airports_bronze >> airports_silver
+        airports_ready >> airports_bronze_airports >> airports_bronze_freqs >> airports_silver
+
+
     # -------- Orchestration with dependency --------
     # Start -> HIST (weather & flight in parallel)
     start >> hist_gate >> tg_hist
     start >> oot_gate >> tg_oot
+    start >> tg_airports >> [tg_hist, tg_oot]
 
     # Finish when HIST (both tasks) and OOT (both tasks) are done
     [tg_hist, tg_oot] >> done

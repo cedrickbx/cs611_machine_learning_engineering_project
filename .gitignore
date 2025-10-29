@@ -175,6 +175,20 @@ dmypy.json
 *.csv
 *.parquet                    # covers files & directories named *.parquet
 
+# allow dir + .gitkeep placeholders (override earlier ignores)
+!data/
+!data/**/.gitkeep
+
+!datamart/
+!datamart/**/.gitkeep
+
+
+# # --- Allowlist: only track airport CSVs in data/airports ---
+# !data/
+# !data/airports/
+# !data/airports/airports.csv
+# !data/airports/airport-frequencies.csv
+
 # =========================
 # OS / misc
 # =========================

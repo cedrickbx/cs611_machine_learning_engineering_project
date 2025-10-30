@@ -146,17 +146,13 @@ def process_main_weather_spark(spark, bronze_dir, silver_dir):
     # left-join original data onto grid
     full = (grid.join(df, on=["NAME", "date", "time"], how="left"))
 
-    # forward/backward fill within (NAME, date) ordered by hour
+    # forward/backward fill within (NAME) ordered by hour
     full = full.withColumn("hour_int", F.substring("time", 1, 2).cast("int"))
 
-    w_fwd  = Window.partitionBy("NAME", "date").orderBy("hour_int").rowsBetween(Window.unboundedPreceding, 0)
-    w_back = Window.partitionBy("NAME", "date").orderBy(F.col("hour_int").desc()).rowsBetween(Window.unboundedPreceding, 0)
+    w_fwd  = Window.partitionBy("NAME").orderBy("hour_int").rowsBetween(Window.unboundedPreceding, 0)
+    w_back = Window.partitionBy("NAME").orderBy(F.col("hour_int").desc()).rowsBetween(Window.unboundedPreceding, 0)
 
-    cols_to_fill = [
-        "wind_dir_deg","wind_type","wind_speed_mps",
-        "ceiling_m","ceiling_code","visibility_m","visibility_var_code",
-        "temp_c","dewpoint_c","slp_hpa"
-    ]
+    cols_to_fill = ["wind_dir_deg","wind_type","wind_speed_mps","ceiling_m","ceiling_code","visibility_m","visibility_var_code","temp_c","dewpoint_c","slp_hpa"]
     for c in cols_to_fill:
         ffill = F.last(F.col(c), ignorenulls=True).over(w_fwd)
         bfill = F.last(F.col(c), ignorenulls=True).over(w_back)
@@ -200,8 +196,8 @@ def process_main_weather_spark(spark, bronze_dir, silver_dir):
             .when(F.col("ceiling_code").isNull(), 9)
             .otherwise(9)    # missing values
             .cast("int")
+            )
         )
-    )
 
     # --- visibility_var_code: 'N','9', None
     df = (df
@@ -215,10 +211,11 @@ def process_main_weather_spark(spark, bronze_dir, silver_dir):
         )
     )
 
-    # frame data as forecast
+    # frame data as forecast and remove colon in `time`
     df = df.withColumn("T+1_forecast", F.col("date"))\
         .withColumn("date", F.date_add(F.col("date"), -1))\
-        .withColumn("name", F.col("NAME"))  
+        .withColumn("name", F.col("NAME"))  \
+        .withColumn("time", F.translate("time", ":", "")) 
 
     # helper to write one named parquet file
     def _write_single_parquet(spark_session, df_single, out_file_path):

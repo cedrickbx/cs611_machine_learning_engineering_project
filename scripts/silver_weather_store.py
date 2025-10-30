@@ -1,4 +1,4 @@
-from utils import data_processing_weather_bronze
+from utils import data_processing_weather_silver
 import argparse
 import os
 import glob
@@ -28,13 +28,13 @@ def main():
     spark.sparkContext.setLogLevel("ERROR")
 
     # create silver datalake
-    data_path = "../data/weather_history/"
     bronze_weather = "../datamart/bronze/weather_history/"
+    silver_weather = "../datamart/silver/weather_history/"
 
-    if not os.path.exists(bronze_weather):
-        os.makedirs(bronze_weather)
+    if not os.path.exists(silver_weather):
+        os.makedirs(silver_weather)
     # run data processing
-    data_processing_weather_bronze.process_main_weather_spark(spark, data_path, bronze_weather)
+    data_processing_weather_silver.process_main_weather_spark(spark, bronze_weather, silver_weather)
     
     # end spark session
     spark.stop()

@@ -48,6 +48,9 @@ def download_noaa_isd_data(start_year=2023, end_year=2025):
         success_count = 0
         missing_years: list[int] = []
 
+        if not os.path.exists(LOCAL_BASE_DIR):
+            os.makedirs(LOCAL_BASE_DIR)
+            
         for year in YEARS:
             s3_key = f"{year}/{station_id}.csv"
             print(f"[{airport_code}] checking {s3_key} ... ", end="", flush=True)
@@ -57,12 +60,7 @@ def download_noaa_isd_data(start_year=2023, end_year=2025):
                 missing_years.append(year)
                 continue
 
-            # Create the station folder only on first success
-            if success_count == 0:
-                local_dir = os.path.join(LOCAL_BASE_DIR, station_id)
-                os.makedirs(local_dir, exist_ok=True)
-
-            local_file_path = os.path.join(LOCAL_BASE_DIR, station_id, f"{year}.csv")
+            local_file_path = os.path.join(LOCAL_BASE_DIR, f"{station_id}_{year}.csv")
             try:
                 s3_client.download_file(BUCKET_NAME, s3_key, local_file_path)
                 print(f"downloaded → {local_file_path}")
@@ -98,6 +96,6 @@ def download_noaa_isd_data(start_year=2023, end_year=2025):
 
     return missing_by_station, stations_with_missing
 
-#use if running as script
-# if __name__ == "__main__":
-#     download_noaa_isd_data()
+# use if running as script
+if __name__ == "__main__":
+    download_noaa_isd_data()

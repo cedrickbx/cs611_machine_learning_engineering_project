@@ -15,7 +15,7 @@ from pyspark.sql.functions import col
 
 # to call this script: python silver_weather_store.py
 
-def main():
+def main(snapshotdate=None):
     print('\n\n---starting job---\n\n')
     
     # Initialize SparkSession
@@ -34,7 +34,7 @@ def main():
     if not os.path.exists(silver_weather):
         os.makedirs(silver_weather)
     # run data processing
-    data_processing_weather_silver.process_main_weather_spark(spark, bronze_weather, silver_weather)
+    data_processing_weather_silver.process_main_weather_spark(spark, bronze_weather, silver_weather, snapshotdate)
     
     # end spark session
     spark.stop()
@@ -44,4 +44,24 @@ def main():
 if __name__ == "__main__":
     # Setup argparse to parse command-line arguments
     parser = argparse.ArgumentParser(description="run job")
-    main()
+    parser.add_argument(
+    "--snapshotdate",
+    type=str,
+    required=False,
+    default=None,
+    help="Snapshot date for daily OOT processing (format: YYYY-MM-DD). If omitted, processes all historical data."
+    )
+    
+    args = parser.parse_args()
+    
+    # Validate date format if provided
+    if args.snapshotdate:
+        try:
+            datetime.strptime(args.snapshotdate, "%Y-%m-%d")
+        except ValueError:
+            print(f"ERROR: Invalid date format: {args.snapshotdate}")
+            print("Expected format: YYYY-MM-DD (e.g., 2025-01-01)")
+            exit(1)
+    
+    # Call main with arguments
+    main(snapshotdate=args.snapshotdate)

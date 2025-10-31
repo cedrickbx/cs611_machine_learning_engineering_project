@@ -6,7 +6,7 @@ from pyspark.sql.types import DateType, StringType
 import os, glob, shutil
 from datetime import date
 
-def process_main_weather_spark(spark, data_path, bronze_dir):
+def process_main_weather_spark(spark, data_path, bronze_dir, snapshotdate=None):
     
     files_list = [data_path+os.path.basename(f) for f in glob.glob(os.path.join(data_path, '*'))]
     df = spark.read.option("recursiveFileLookup", "true").option("header", "true").option("inferSchema", "true").csv(data_path)
@@ -52,33 +52,40 @@ def process_main_weather_spark(spark, data_path, bronze_dir):
                     except Exception:
                         pass
 
-    data_end_date = "2025-04-01"
-    df = df.filter(F.col("extracted_date") <= F.lit(data_end_date))
-    cutoff = date(2025, 1, 1)
-
-    # One file for everything before cutoff
-    df_pre = df.filter(F.col("extracted_date") < F.lit(cutoff)).drop("extracted_date")
-    pre_count = df_pre.count()
-    if pre_count > 0:
-        pre_out = f"{bronze_dir}bronze_weather_store_2023_2024.parquet"
-        _write_single_parquet(spark, df_pre, pre_out)
-        print(f"saved: {pre_out}  rows={pre_count}")
-    
-    # One file per date (chronological) on/after cutoff
-    df_post = df.filter(F.col("extracted_date") >= F.lit(cutoff))
-    dates = (df_post.select("extracted_date")
-                    .where(F.col("extracted_date").isNotNull())
-                    .distinct()
-                    .orderBy("extracted_date")      # ensures chronological generation
-                    .collect())
-                    
-    for r in dates:
-        d = r["extracted_date"]
-        date_str = d.strftime("%Y-%m-%d")
-        df_d = df_post.filter(F.col("date") == F.lit(d)).drop("extracted_date")
+    if snapshotdate:
+        date_str = snapshotdate.strftime("%Y-%m-%d")
+        df = df.filter(F.col("extracted_date") == date_str)
+        df_d = df.drop("extracted_date")
         out_path = f"{bronze_dir}bronze_weather_store_{date_str}.parquet"
         _write_single_parquet(spark, df_d, out_path)
         print(f"saved {out_path}  rows={df_d.count()}")
+    else:
+        data_end_date = "2025-04-01"
+        df = df.filter(F.col("extracted_date") <= F.lit(data_end_date))
+        cutoff = date(2025, 1, 1)
+        # One file for everything before cutoff
+        df_pre = df.filter(F.col("extracted_date") < F.lit(cutoff)).drop("extracted_date")
+        pre_count = df_pre.count()
+        if pre_count > 0:
+            pre_out = f"{bronze_dir}bronze_weather_store_2023_2024.parquet"
+            _write_single_parquet(spark, df_pre, pre_out)
+            print(f"saved: {pre_out}  rows={pre_count}")
+        
+        # One file per date (chronological) on/after cutoff
+        df_post = df.filter(F.col("extracted_date") >= F.lit(cutoff))
+        dates = (df_post.select("extracted_date")
+                        .where(F.col("extracted_date").isNotNull())
+                        .distinct()
+                        .orderBy("extracted_date")      # ensures chronological generation
+                        .collect())
+                        
+        for r in dates:
+            d = r["extracted_date"]
+            date_str = d.strftime("%Y-%m-%d")
+            df_d = df_post.filter(F.col("date") == F.lit(d)).drop("extracted_date")
+            out_path = f"{bronze_dir}bronze_weather_store_{date_str}.parquet"
+            _write_single_parquet(spark, df_d, out_path)
+            print(f"saved {out_path}  rows={df_d.count()}")
 
 
 

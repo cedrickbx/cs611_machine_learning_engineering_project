@@ -176,11 +176,11 @@ dmypy.json
 *.parquet                    # covers files & directories named *.parquet
 
 # allow dir + .gitkeep placeholders (override earlier ignores)
-!data/
+/data/**
 !data/**/.gitkeep
 
-!datamart/
-!datamart/**/.gitkeep
+/datamart/**                 # ignore EVERYTHING under datamart
+!/datamart/**/.gitkeep       # …but allow .gitkeep placeholders so dirs can exist
 
 
 # # --- Allowlist: only track airport CSVs in data/airports ---

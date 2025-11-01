@@ -252,11 +252,16 @@ Project Root/
 ## Dependencies
 - PySpark
 - Python 3.x
-- Existing utilities:
+- utilities:
   - `utils/data_processing_flight_bronze.py`
   - `utils/data_processing_flight_silver.py`
+  - `utils/data_processing_flight_gold.py`
 
 ---
 
-**Status**: ✅ Complete and ready for deployment
-**Date**: November 1, 2025
+**Status**: ✅ Complete and ready for deployment on January 1, 2025
+Run inference for period January 1, 2025 to February 28, 2025
+Retraining on February 28, 2025
+Deployment with retrained model on March 1, 2025
+
+**Date**: Nov 1, 2025

@@ -181,7 +181,7 @@ Flight 3-hour bucket → Weather time bucket
 ### 4. Target Variable Design
 - Changed from binary (is_delayed_15) to ordinal (IS_DELAYED)
 - 3 categories allow for multi-class classification
-- Based on arrival delay (primary passenger experience metric)
+- Based on arrival/departure delay (primary passenger experience metric)
 
 ---
 

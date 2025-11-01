@@ -180,6 +180,9 @@ def test_sample_data_loading():
         print(f"   ✓ Loaded successfully")
         print(f"   Rows: {row_count:,}")
         print(f"   Columns: {col_count}")
+        print("\nColumns in Test File DataFrame:")
+        print(df.columns)
+
         
         # Check for required columns
         required_cols = ['YEAR', 'MONTH', 'DAY_OF_MONTH', 'ORIGIN', 'DEST', 

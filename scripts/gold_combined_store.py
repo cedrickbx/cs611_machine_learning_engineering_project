@@ -474,7 +474,7 @@ def main(snapshotdate=None):
     else:
         # Historical mode
         flight_gold_path = "datamart/gold/flight/flight_gold_historical.parquet"
-        weather_path = "datamart/silver/weather/silver_weather_store_historical.parquet"
+        weather_path = "datamart/silver/weather/silver_weather_store_2023_2024.parquet"
         gold_combined_output_path = "datamart/gold/combined/gold_combined_historical.parquet"
         is_daily = False
     

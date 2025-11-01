@@ -60,7 +60,22 @@ def process_silver_to_flight_gold(silver_path, flight_gold_output_path, spark,
     # Filter by snapshot_date if provided
     if snapshot_date:
         print(f"  Filtering for snapshot_date: {snapshot_date}")
-        df = df.filter(col("snapshot_date") == snapshot_date)
+        if 'snapshot_date' in df.columns:
+            df = df.filter(col("snapshot_date") == snapshot_date)
+        else:
+            # If snapshot_date doesn't exist, add it
+            from pyspark.sql.functions import lit, to_date
+            df = df.withColumn("snapshot_date", to_date(lit(snapshot_date)))
+            print(f"    Added snapshot_date column: {snapshot_date}")
+    else:
+        # Historical mode - ensure snapshot_date column exists
+        if 'snapshot_date' not in df.columns:
+            # If snapshot_date doesn't exist, derive from FlightDate
+            if 'FlightDate' in df.columns:
+                df = df.withColumn("snapshot_date", col("FlightDate"))
+                print(f"    Created snapshot_date from FlightDate")
+            else:
+                print("    ⚠ WARNING: No snapshot_date or FlightDate column found")
     
     initial_count = df.count()
     initial_cols = len(df.columns)
@@ -89,6 +104,10 @@ def process_silver_to_flight_gold(silver_path, flight_gold_output_path, spark,
     print(f"    Final rows: {final_count:,}")
     print(f"    Final columns: {final_cols}")
     print(f"    Columns added: {final_cols - initial_cols + 7}")  # +7 because we dropped 7
+    
+    # Verify snapshot_date exists before saving
+    if 'snapshot_date' not in df.columns:
+        raise ValueError("snapshot_date column missing - cannot partition output!")
     
     # Save Flight Gold layer
     print(f"\n  Saving Flight Gold to: {flight_gold_output_path}")
@@ -375,3 +394,5 @@ Examples:
             exit(1)
     
     main(snapshotdate=args.snapshotdate)
+
+

@@ -61,13 +61,13 @@ def main(snapshotdate=None):
     if snapshotdate:
         # OOT mode - read from Bronze OOT
         snap_tag = snapshotdate.replace("-", "_")
-        bronze_path = f"datamart/bronze/flight/bronze_flight_oot_{snap_tag}.parquet"
-        silver_output_path = f"datamart/silver/flight/silver_flight_oot_{snap_tag}.parquet"
+        bronze_path = f"../datamart/bronze/flight/bronze_flight_oot_{snap_tag}.parquet"
+        silver_output_path = f"../datamart/silver/flight/silver_flight_oot_{snap_tag}.parquet"
         is_daily = True
     else:
         # Historical mode
-        bronze_path = "datamart/bronze/flight/bronze_flight_historical.parquet"
-        silver_output_path = "datamart/silver/flight/silver_flight_historical.parquet"
+        bronze_path = "../datamart/bronze/flight/bronze_flight_historical.parquet"
+        silver_output_path = "../datamart/silver/flight/silver_flight_historical.parquet"
         is_daily = False
     
     # Check if bronze directory exists

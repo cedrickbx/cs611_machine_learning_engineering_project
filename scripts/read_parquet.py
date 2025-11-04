@@ -1,27 +1,43 @@
-# Import required libraries
+# read_parquet.py
 import pandas as pd
 from pathlib import Path
+import sys
 
-# Define paths to parquet files
-combined_parquet = "datamart/gold/combined/test_gold_combined_oot.parquet/snapshot_date=2025-01-15"
-flight_parquet = "datamart/gold/flight/test_flight_gold_oot.parquet/snapshot_date=2025-01-15"
+# Resolve paths relative to this file's location (not the terminal CWD)
+ROOT = Path(__file__).resolve().parent
 
-# Read parquet files into pandas DataFrames
-df_combined = pd.read_parquet(combined_parquet)
-df_flight = pd.read_parquet(flight_parquet)
+combined_parquet = ROOT / "datamart/gold/gold_combined_historical.parquet/snapshot_date=2023-01-01"
+flight_parquet   = ROOT / "datamart/gold/flight/flight_gold_oot_2025_01_01.parquet/snapshot_date=2025-01-01"
 
-# Display basic information about the DataFrames
-print("\nCombined DataFrame Info:")
-print(df_combined.info())
-print("\nShape:", df_combined.shape)
+def check_exists(p: Path):
+    if not p.exists():
+        print(f"❌ Path not found: {p}")
+        sys.exit(1)
 
-print("\nFlight DataFrame Info:")
-print(df_flight.info())
-print("\nShape:", df_flight.shape)
+def read_parquet_fast(path: Path):
+    # Prefer PyArrow engine; it’s fastest and supports directories
+    return pd.read_parquet(path, engine="pyarrow", dtype_backend="pyarrow")
 
-# Display first few rows of each DataFrame
-print("\nFirst 5 rows of Combined DataFrame:")
-print(df_combined.head())
+def main():
+    check_exists(combined_parquet)
+    check_exists(flight_parquet)
 
-print("\nFirst 5 rows of Flight DataFrame:")
-print(df_flight.head())
+    df_combined = read_parquet_fast(combined_parquet)
+    df_flight   = read_parquet_fast(flight_parquet)
+
+    print("\nCombined DataFrame Info:")
+    print(df_combined.info())
+    print("\nShape:", df_combined.shape)
+
+    print("\nFlight DataFrame Info:")
+    print(df_flight.info())
+    print("\nShape:", df_flight.shape)
+
+    print("\nFirst 5 rows of Combined DataFrame:")
+    print(df_combined.head())
+
+    print("\nFirst 5 rows of Flight DataFrame:")
+    print(df_flight.head())
+
+if __name__ == "__main__":
+    main()

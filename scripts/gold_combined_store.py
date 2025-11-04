@@ -467,15 +467,15 @@ def main(snapshotdate=None):
     if snapshotdate:
         # OOT mode
         snap_tag = snapshotdate.replace("-", "_")
-        flight_gold_path = f"datamart/gold/flight/flight_gold_oot_{snap_tag}.parquet"
-        weather_path = f"datamart/silver/weather/silver_weather_store_{snapshotdate}.parquet"
-        gold_combined_output_path = f"datamart/gold/combined/gold_combined_oot_{snap_tag}.parquet"
+        flight_gold_path = f"../datamart/gold/flight/flight_gold_oot_{snap_tag}.parquet"
+        weather_path = f"../datamart/silver/weather_history/silver_weather_store_{snapshotdate}.parquet"
+        gold_combined_output_path = f"../datamart/gold/combined/gold_combined_oot_{snap_tag}.parquet"
         is_daily = True
     else:
         # Historical mode
-        flight_gold_path = "datamart/gold/flight/flight_gold_historical.parquet"
-        weather_path = "datamart/silver/weather/silver_weather_store_2023_2024.parquet"
-        gold_combined_output_path = "datamart/gold/combined/gold_combined_historical.parquet"
+        flight_gold_path = "../datamart/gold/flight/flight_gold_historical.parquet"
+        weather_path = "../datamart/silver/weather_history/silver_weather_store_2023_2024.parquet"
+        gold_combined_output_path = "../datamart/gold/combined/gold_combined_historical.parquet"
         is_daily = False
     
     # Check if flight gold exists

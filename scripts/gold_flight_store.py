@@ -268,13 +268,13 @@ def main(snapshotdate=None):
     if snapshotdate:
         # OOT mode
         snap_tag = snapshotdate.replace("-", "_")
-        silver_path = f"datamart/silver/flight/silver_flight_oot_{snap_tag}.parquet"
-        flight_gold_output_path = f"datamart/gold/flight/flight_gold_oot_{snap_tag}.parquet"
+        silver_path = f"../datamart/silver/flight/silver_flight_oot_{snap_tag}.parquet"
+        flight_gold_output_path = f"../datamart/gold/flight/flight_gold_oot_{snap_tag}.parquet"
         is_daily = True
     else:
         # Historical mode
-        silver_path = "datamart/silver/flight/silver_flight_historical.parquet"
-        flight_gold_output_path = "datamart/gold/flight/flight_gold_historical.parquet"
+        silver_path = "../datamart/silver/flight/silver_flight_historical.parquet"
+        flight_gold_output_path = "../datamart/gold/flight/flight_gold_historical.parquet"
         is_daily = False
     
     # Check if silver directory exists

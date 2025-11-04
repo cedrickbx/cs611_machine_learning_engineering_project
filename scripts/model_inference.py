@@ -1,134 +1,141 @@
-import argparse
-import os
-import glob
+# scripts/model_inference.py
+import argparse, os
+from datetime import datetime
 import pandas as pd
-import pickle
-import matplotlib.pyplot as plt
-import numpy as np
-import random
-from datetime import datetime, timedelta
-from dateutil.relativedelta import relativedelta
-import pprint
-import pyspark
+
+import mlflow
+from mlflow.tracking import MlflowClient
+
+from utils.model_training_utils import spark_session, read_parquet_glob
 import pyspark.sql.functions as F
-
 from pyspark.sql.functions import col
-from pyspark.sql.types import StringType, IntegerType, FloatType, DateType
-
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-
-import xgboost as xgb
-from sklearn.model_selection import RandomizedSearchCV
-from sklearn.metrics import make_scorer, f1_score, roc_auc_score
-from sklearn.datasets import make_classification
-from sklearn.model_selection import train_test_split
 
 
-# to call this script: python model_train.py --snapshotdate "2024-09-01"
-
-def main(snapshotdate, modelname):
-    print('\n\n---starting job---\n\n')
-    
-    # Initialize SparkSession
-    spark = pyspark.sql.SparkSession.builder \
-        .appName("dev") \
-        .master("local[*]") \
-        .getOrCreate()
-    
-    # Set log level to ERROR to hide warnings
-    spark.sparkContext.setLogLevel("ERROR")
-
-    
-    # --- set up config ---
-    config = {}
-    config["snapshot_date_str"] = snapshotdate
-    config["snapshot_date"] = datetime.strptime(config["snapshot_date_str"], "%Y-%m-%d")
-    config["model_name"] = modelname
-    config["model_bank_directory"] = "model_bank/"
-    config["model_artefact_filepath"] = config["model_bank_directory"] + config["model_name"]
-    
-    pprint.pprint(config)
-    
-
-    # --- load model artefact from model bank ---
-    # Load the model from the pickle file
-    with open(config["model_artefact_filepath"], 'rb') as file:
-        model_artefact = pickle.load(file)
-    
-    print("Model loaded successfully! " + config["model_artefact_filepath"])
+def load_features_for_date(spark, features_dir: str, snapshotdate: str) -> pd.DataFrame:
+    sdf = read_parquet_glob(spark, features_dir, "gold_pretrain_features")
+    sdf = sdf.withColumn("label_snapshot_date", F.to_date(col("label_snapshot_date")))
+    sdf = sdf.filter(col("label_snapshot_date") == F.lit(snapshotdate))
+    return sdf.toPandas()
 
 
-    # --- load feature store ---
-    feature_location = "data/feature_clickstream.csv"
-    
-    # Load CSV into DataFrame - connect to feature store
-    features_store_sdf = spark.read.csv(feature_location, header=True, inferSchema=True)
-    # print("row_count:",features_store_sdf.count())
-    
-    
-    # extract feature store
-    features_sdf = features_store_sdf.filter((col("snapshot_date") == config["snapshot_date"]))
-    print("extracted features_sdf", features_sdf.count(), config["snapshot_date"])
-    
-    features_pdf = features_sdf.toPandas()
+def resolve_model_uri(args):
+    if args.model_uri:
+        return args.model_uri, None
+    return f"models:/{args.model_name}/{args.model_stage}", args.model_stage
 
 
-    # --- preprocess data for modeling ---
-    # prepare X_inference
-    feature_cols = [fe_col for fe_col in features_pdf.columns if fe_col.startswith('fe_')]
-    X_inference = features_pdf[feature_cols]
-    
-    # apply transformer - standard scaler
-    transformer_stdscaler = model_artefact["preprocessing_transformers"]["stdscaler"]
-    X_inference = transformer_stdscaler.transform(X_inference)
-    
-    print('X_inference', X_inference.shape[0])
+def get_model_version_info(client: MlflowClient, model_uri: str, chosen_stage: str | None):
+    try:
+        if model_uri.startswith("models:/"):
+            name = model_uri.split("/")[1]
+            stage_or_ver = model_uri.split("/")[2]
+            if stage_or_ver.isdigit():
+                return int(stage_or_ver), chosen_stage or "None"
+            for mv in client.search_model_versions(f"name = '{name}'"):
+                if mv.current_stage == stage_or_ver:
+                    return int(mv.version), mv.current_stage
+        return None, chosen_stage or "None"
+    except Exception:
+        return None, chosen_stage or "None"
 
 
-    # --- model prediction inference ---
-    # load model
-    model = model_artefact["model"]
-    
-    # predict model
-    y_inference = model.predict_proba(X_inference)[:, 1]
-    
-    # prepare output
-    y_inference_pdf = features_pdf[["Customer_ID","snapshot_date"]].copy()
-    y_inference_pdf["model_name"] = config["model_name"]
-    y_inference_pdf["model_predictions"] = y_inference
-    
+def main(args):
+    # ---------- MLflow ----------
+    tracking_uri = args.tracking_uri or os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+    mlflow.set_tracking_uri(tracking_uri)
+    client = MlflowClient()
+    model_uri, chosen_stage = resolve_model_uri(args)
 
-    # --- save model inference to datamart gold table ---
-    # create bronze datalake
-    gold_directory = f"datamart/gold/model_predictions/{config["model_name"][:-4]}/"
-    print(gold_directory)
-    
-    if not os.path.exists(gold_directory):
-        os.makedirs(gold_directory)
-    
-    # save gold table - IRL connect to database to write
-    partition_name = config["model_name"][:-4] + "_predictions_" + config["snapshot_date_str"].replace('-','_') + '.parquet'
-    filepath = gold_directory + partition_name
-    spark.createDataFrame(y_inference_pdf).write.mode("overwrite").parquet(filepath)
-    # df.toPandas().to_parquet(filepath,
-    #           compression='gzip')
-    print('saved to:', filepath)
-
-    
-    # --- end spark session --- 
+    # ---------- Load features ----------
+    spark = spark_session()
+    pdf = load_features_for_date(spark, args.gold_pretrain_features_dir, args.snapshotdate)
     spark.stop()
-    
-    print('\n\n---completed job---\n\n')
+    if pdf.empty:
+        raise RuntimeError(f"No features found in {args.gold_pretrain_features_dir} for snapshotdate={args.snapshotdate}")
+
+    key_cols = [c for c in ["Customer_ID", "label_snapshot_date"] if c in pdf.columns]
+
+    # ---------- Load model (sklearn flavor to use predict_proba) ----------
+    import mlflow.sklearn as mls
+    clf = mls.load_model(model_uri=model_uri)
+
+    # ---------- Predict ----------
+    proba = clf.predict_proba(pdf)
+    if proba.ndim == 2:
+        default_proba = proba[:, 1]
+    else:
+        # Rare fallback; normalize to [0,1]
+        from sklearn.preprocessing import MinMaxScaler
+        default_proba = MinMaxScaler().fit_transform(proba.reshape(-1, 1)).ravel()
+
+    default_flag = (default_proba >= args.threshold).astype(int)
+
+    # ---------- Build output DF ----------
+    scored_at = datetime.now().astimezone().isoformat()
+    out_df = pd.DataFrame(index=pdf.index)
+    for k in key_cols:
+        out_df[k] = pdf[k]
+    out_df["default_proba"] = default_proba
+    out_df["default"] = default_flag
+    out_df["snapshotdate"] = args.snapshotdate
+    out_df["scored_at"] = scored_at
+    out_df["model_uri"] = model_uri
+
+    mv, stage = get_model_version_info(client, model_uri, chosen_stage)
+    out_df["model_version"] = mv if mv is not None else ""
+    out_df["model_stage"] = stage
+
+    # ---------- Persist (filesystem) ----------
+    os.makedirs(args.predictions_out_dir, exist_ok=True)
+    base = f"pred_{args.snapshotdate.replace('-', '')}"
+    parquet_path = os.path.join(args.predictions_out_dir, f"{base}.parquet")
+    csv_path = os.path.join(args.predictions_out_dir, f"{base}.csv") if args.write_csv else None
+
+    out_df.to_parquet(parquet_path, index=False)
+    if csv_path:
+        out_df.to_csv(csv_path, index=False)
+
+    print(f"[INFER] Wrote: {parquet_path}" + (f" and {csv_path}" if csv_path else ""))
+
+    # ---------- MLflow (artifacts only) ----------
+    mlflow.set_experiment(args.experiment)
+    with mlflow.start_run(run_name=f"infer_{args.snapshotdate.replace('-', '_')}") as run:
+        mlflow.set_tags({
+            "snapshotdate": args.snapshotdate,
+            "purpose": "inference",
+            "model_uri": model_uri,
+            "source": "airflow",
+        })
+        mlflow.log_params({
+            "rows_scored": int(out_df.shape[0]),
+            "threshold": float(args.threshold),
+            "model_uri": model_uri,
+            "model_version": mv if mv is not None else -1,
+            "model_stage": stage,
+        })
+        mlflow.log_artifact(parquet_path, artifact_path="predictions")
+        if csv_path:
+            mlflow.log_artifact(csv_path, artifact_path="predictions")
+
+        print(f"[INFER] run_id={run.info.run_id}")
+        print(f"[INFER] artifact_uri: {mlflow.get_artifact_uri('predictions')}")
 
 
 if __name__ == "__main__":
-    # Setup argparse to parse command-line arguments
-    parser = argparse.ArgumentParser(description="run job")
-    parser.add_argument("--snapshotdate", type=str, required=True, help="YYYY-MM-DD")
-    parser.add_argument("--modelname", type=str, required=True, help="model_name")
-    
-    args = parser.parse_args()
-    
-    # Call main with arguments explicitly passed
-    main(args.snapshotdate, args.modelname)
+    ap = argparse.ArgumentParser(description="Score Gold pretrain features and store predictions via MLflow (no metrics).")
+    ap.add_argument("--snapshotdate", required=True, help="YYYY-MM-DD to score")
+    ap.add_argument("--gold-pretrain-features-dir", type=str,
+                    default=os.path.join("datamart", "gold", "pretrain", "features") + "/")
+    ap.add_argument("--predictions-out-dir", type=str,
+                    default=os.path.join("datamart", "gold", "model_predictions") + "/")
+    ap.add_argument("--threshold", type=float, default=0.5, help="Decision threshold for default flag")
+    # MLflow model resolution
+    ap.add_argument("--model-uri", default=None, help="Explicit URI (runs:/... or models:/name/Stage)")
+    ap.add_argument("--model-name", default="credit_risk_model")
+    ap.add_argument("--model-stage", default="Production")
+    # Options
+    ap.add_argument("--experiment", default="credit_risk_inference")
+    ap.add_argument("--tracking-uri", default=None)
+    ap.add_argument("--write-csv", action="store_true")
+    args = ap.parse_args()
+    main(args)

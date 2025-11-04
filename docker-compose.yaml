@@ -1,5 +1,6 @@
 services:
   postgres:
+    container_name: gp-postgres
     image: postgres:13
     environment:
       POSTGRES_USER: airflow
@@ -16,6 +17,7 @@ services:
       retries: 5
 
   postgres-mlflow:
+    container_name: gp-postgres-mlflow
     image: postgres:13
     environment:
       POSTGRES_USER: mlflow
@@ -33,13 +35,15 @@ services:
       retries: 5
 
   mlflow:
+    container_name: gp-mlflow
     image: python:3.9-slim
     depends_on:
       postgres-mlflow:
         condition: service_healthy
     environment:
-      MLFLOW_DEFAULT_ARTIFACT_ROOT: /tmp/mlflow/artifacts
-      GIT_PYTHON_REFRESH: quiet
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MLFLOW_DEFAULT_ARTIFACT_ROOT=/tmp/mlflow/artifacts
+      - GIT_PYTHON_REFRESH=quiet
     volumes:
       - mlflow_data:/tmp/mlflow
       - ./scripts:/opt/airflow/scripts
@@ -59,16 +63,18 @@ services:
       start_period: 40s
 
   airflow-init:
+    container_name: gp-airflow-init
     build: .
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
-      AIRFLOW__CORE__FERNET_KEY: PAqBeGJLJTYFzVkOGHWIYXdLO7XdXz5yTdxAGJe9ezM=
-      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
-      AIRFLOW__METRICS__STATSD_ON: "False"
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      - AIRFLOW__CORE__FERNET_KEY=PAqBeGJLJTYFzVkOGHWIYXdLO7XdXz5yTdxAGJe9ezM=
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__METRICS__STATSD_ON=False
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
     volumes:
       - airflow_data:/opt/airflow
       - ./dags:/opt/airflow/dags
@@ -87,6 +93,7 @@ services:
     restart: on-failure
 
   airflow-webserver:
+    container_name: gp-airflow-webserver
     build: .
     depends_on:
       airflow-init:
@@ -96,12 +103,13 @@ services:
       mlflow:
         condition: service_healthy
     environment:
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
-      AIRFLOW__CORE__FERNET_KEY: PAqBeGJLJTYFzVkOGHWIYXdLO7XdXz5yTdxAGJe9ezM=
-      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
-      AIRFLOW__METRICS__STATSD_ON: "False"
-      AIRFLOW__CORE__DAGBAG_IMPORT_TIMEOUT: "60"
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      - AIRFLOW__CORE__FERNET_KEY=PAqBeGJLJTYFzVkOGHWIYXdLO7XdXz5yTdxAGJe9ezM=
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__METRICS__STATSD_ON=False
+      - AIRFLOW__CORE__DAGBAG_IMPORT_TIMEOUT=60
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
     volumes:
       - airflow_data:/opt/airflow
       - ./dags:/opt/airflow/dags
@@ -109,12 +117,14 @@ services:
       - ./datamart:/opt/airflow/datamart
       - ./data:/opt/airflow/data
       - ./data/airports:/opt/airflow/data/airports
+      - mlflow_data:/tmp/mlflow
     ports:
       - "8080:8080"
     command: webserver
     restart: unless-stopped
 
   airflow-scheduler:
+    container_name: gp-airflow-scheduler
     build: .
     depends_on:
       airflow-init:
@@ -124,12 +134,13 @@ services:
       mlflow:
         condition: service_healthy
     environment:
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
-      AIRFLOW__CORE__FERNET_KEY: PAqBeGJLJTYFzVkOGHWIYXdLO7XdXz5yTdxAGJe9ezM=
-      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
-      AIRFLOW__METRICS__STATSD_ON: "False"
-      AIRFLOW__CORE__DAGBAG_IMPORT_TIMEOUT: "60"
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      - AIRFLOW__CORE__FERNET_KEY=PAqBeGJLJTYFzVkOGHWIYXdLO7XdXz5yTdxAGJe9ezM=
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__METRICS__STATSD_ON=False
+      - AIRFLOW__CORE__DAGBAG_IMPORT_TIMEOUT=60
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
     volumes:
       - airflow_data:/opt/airflow
       - ./dags:/opt/airflow/dags
@@ -137,12 +148,57 @@ services:
       - ./datamart:/opt/airflow/datamart
       - ./data:/opt/airflow/data
       - ./data/airports:/opt/airflow/data/airports
+      - mlflow_data:/tmp/mlflow
     command: scheduler
     restart: unless-stopped
 
+  # Prometheus for metrics collection (optional)
+  prometheus:
+    container_name: gp-prometheus
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+
+  # Grafana for metrics visualization (optional)
+  grafana:
+    container_name: gp-grafana
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+  pgadmin:
+    container_name: gp-pgadmin
+    image: dpage/pgadmin4
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=admin@admin.com
+      - PGADMIN_DEFAULT_PASSWORD=admin
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   lab:
     image: jupyter/pyspark-notebook:latest
-    container_name: mle-project-jupyter
+    container_name: gp-jupyter
     ports:
       - "8892:8892"
     volumes:
@@ -162,3 +218,6 @@ volumes:
   postgres_mlflow_data: {}
   mlflow_data: {}
   airflow_data: {}
+  prometheus_data: {}
+  grafana_data: {}
+  pgadmin_data: {}
